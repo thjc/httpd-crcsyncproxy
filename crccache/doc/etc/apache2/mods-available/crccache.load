@@ -1,0 +1,1 @@
+LoadModule crccache_client_module /home/tcollett/Projects/crccache/clientmod/mod_crccache_client.so

@@ -1,0 +1,16 @@
+ServerName localhost
+CacheEnable crccache_server /
+
+<VirtualHost *:8081>
+	ServerAdmin webmaster@localhost
+	ServerName localhost
+
+	ProxyRequests On
+	ProxyVia On
+	<Proxy *>
+		Order deny,allow
+		Deny from all
+		Allow from 127.0.0.1
+	</Proxy> 
+	
+</VirtualHost>

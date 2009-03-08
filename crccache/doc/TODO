@@ -1,0 +1,9 @@
+Actually encode the reply
+
+Add the decode filter correctly and decode the response.
+
+Test
+Optimize
+Look at ways to reuse the disk_cache code more effectively.
+Error checking
+

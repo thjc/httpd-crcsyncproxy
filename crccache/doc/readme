@@ -1,0 +1,20 @@
+The test setup I have been using has apache setup as two proxy servers, one on port 8080 and one on 8081.
+
+The proxy on port 8080 is set up with mod_crccache_client as a cache provider with 8081 as an upstream proxy for it
+
+The proxy on port 8081 is set up with mod_crccache_server and fetches the pages directly.
+
+For debugging it is useful to set max clients to 2 on the apache server so you can gdb attach to the processes if needed.
+
+I have been using 
+http_proxy=http://localhost:8080/ wget http://www.w3.org -S -t 1 -O /dev/null
+to test the setup.
+
+At the moment in the source I have hard coded the cache expiry to 30 seconds so it actually hits the upstream server
+often enough for testing.
+
+The module should work with a standard ubuntu apache install (thats my test setup), I have included the files I have
+added or changed under etc in this doc dir.
+
+See TODO for a list of things that are still pending
+
