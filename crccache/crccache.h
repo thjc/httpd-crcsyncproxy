@@ -19,6 +19,12 @@ const int HASH_BASE64_SIZE_PADDING=3; // decoded/coded in blocks of 4 into three
 const int HASH_HEADER_SIZE=100;//BLOCK_COUNT*HASH_BASE64_SIZE;
 
 
+const unsigned char ENCODING_LITERAL='L';
+const unsigned char ENCODING_BLOCK='B';
+
+const int ENCODING_LITERAL_HEADER_SIZE = 1+4;// 1 byte indicator + 4 bytes length
+const int ENCODING_BLOCK_HEADER_SIZE = 1+1;// 1 byte indicator + 1 byte block
+
 unsigned decode_30bithash(const char * source);
 char * encode_30bithash(unsigned hash, char * target);
 
