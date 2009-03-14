@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <assert.h>
+
 #include "apr_file_io.h"
 #include "apr_strings.h"
 #include "mod_cache.h"
@@ -81,12 +83,12 @@ typedef enum decoding_state {
 typedef struct crccache_client_ctx_t {
 	apr_bucket_brigade *bb;
 	size_t block_size;
+	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
 
 	decoding_state state;
 	unsigned section_length;
 	unsigned processed_length;
 	char section_header[4];
-// need to add pointer to file data here
 } crccache_client_ctx;
 
 /*
@@ -780,7 +782,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 
 	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-	"crccache: generatinf hash, read %ld bytes",len);
+	"crccache: generating hash, read %ld bytes",len);
 
 	// this will be rounded down, but thats okay
 	size_t blocksize = len/BLOCK_COUNT;
@@ -802,12 +804,12 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 
 		for (i = 0; i < BLOCK_COUNT;++i)
 		{
-			// encode the hase into base64
+			// encode the hase into base64;
 			encode_30bithash(crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX]);
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
 			"crccache: block %d, hash %08X",i,crcs[i]);
 		}
-		apr_bucket_delete(e);
+		//apr_bucket_delete(e);
 
 		// TODO: do we want to cache the hashes here?
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
@@ -818,6 +820,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 		ctx->block_size = blocksize;
 		ctx->state = DECODING_NEW_SECTION;
+		ctx->cached_bucket = e;
 
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
@@ -1196,6 +1199,8 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			/* This filter is done once it has served up its content */
 			ap_remove_output_filter(f);
 
+			// TODO: check strong hash here
+
 			/* Okay, we've seen the EOS.
 			 * Time to pass it along down the chain.
 			 */
@@ -1292,7 +1297,11 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 							"CRCSYNC-DECODE, block section, block %d",block_number);
 
 					char * buf = apr_palloc(r->pool, ctx->block_size);
-					memset(buf,'B',ctx->block_size);
+					const char * source_data;
+					size_t source_len;
+					apr_bucket_read(ctx->cached_bucket, &source_data, &source_len, APR_BLOCK_READ);
+					assert(source_len >= ctx->block_size*block_number);
+					memcpy(buf,&source_data[block_number*ctx->block_size],ctx->block_size);
 					apr_bucket * b = apr_bucket_pool_create(buf, ctx->block_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 
