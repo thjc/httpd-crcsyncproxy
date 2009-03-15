@@ -1,0 +1,20 @@
+The module should work with a standard SuSE 11.1 apache install, if you follow below instructions:
+
+1) load modules:
+Add following values to parameter APACHE_MODULES in /etc/sysconfig/apache2:
+ proxy proxy_http cache /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_client.so /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_server.so
+
+
+2) set-up virtual hosts:
+copy <this-doc-dir>/etc/apache2/sites-available/default to /etc/apache2/vhosts.d/default.conf
+copy <this-doc-dir>/etc/apache2/sites-available/upstream_proxy to /etc/apache2/vhosts.d/upstream_proxy.conf
+
+3) configure modules
+copy <this-doc-dir>/etc/apache2/mods-available/*.conf to /etc/apache2/conf.d
+
+4) add listen ports and virtual server ports to /etc/apache2/listen.conf
+listen 8080
+listen 8081
+NameVirtualHost *:8080
+NameVirtualHost *:8081
+

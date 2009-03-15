@@ -13,8 +13,9 @@ to test the setup.
 At the moment in the source I have hard coded the cache expiry to 30 seconds so it actually hits the upstream server
 often enough for testing.
 
-The module should work with a standard ubuntu apache install (thats my test setup), I have included the files I have
-added or changed under etc in this doc dir.
+How to set-up:
+See readme.ubuntu for Ubuntu
+See readme.suse for Suse
 
 See TODO for a list of things that are still pending
 

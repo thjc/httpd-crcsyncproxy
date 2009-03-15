@@ -386,7 +386,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 		if (!error_logged) {
 			error_logged = 1;
 			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
-					"disk_cache: Cannot cache files to disk without a CacheRoot specified.");
+					"disk_cache: Cannot cache files to disk without a CacheRootClient specified.");
         }
         return DECLINED;
     }
@@ -1384,9 +1384,9 @@ static const char *set_cache_dirlevels(cmd_parms *parms, void *in_struct_ptr,
 			&crccache_client_module);
 	int val = atoi(arg);
 	if (val < 1)
-		return "CacheDirLevels value must be an integer greater than 0";
+		return "CacheDirLevelsClient value must be an integer greater than 0";
 	if (val * conf->dirlength > CACHEFILE_LEN)
-		return "CacheDirLevels*CacheDirLength value must not be higher than 20";
+		return "CacheDirLevelsClient*CacheDirLengthClient value must not be higher than 20";
 	conf->dirlevels = val;
 	return NULL;
 }
@@ -1396,9 +1396,9 @@ static const char *set_cache_dirlength(cmd_parms *parms, void *in_struct_ptr,
 			&crccache_client_module);
 	int val = atoi(arg);
 	if (val < 1)
-		return "CacheDirLength value must be an integer greater than 0";
+		return "CacheDirLengthClient value must be an integer greater than 0";
 	if (val * conf->dirlevels > CACHEFILE_LEN)
-		return "CacheDirLevels*CacheDirLength value must not be higher than 20";
+		return "CacheDirLevelsClient*CacheDirLengthClient value must not be higher than 20";
 
 	conf->dirlength = val;
 	return NULL;
@@ -1411,7 +1411,7 @@ static const char *set_cache_minfs(cmd_parms *parms, void *in_struct_ptr,
 
 	if (apr_strtoff(&conf->minfs, arg, NULL, 0) != APR_SUCCESS || conf->minfs
 			< 0) {
-		return "CacheMinFileSize argument must be a non-negative integer representing the min size of a file to cache in bytes.";
+		return "CacheMinFileSizeClient argument must be a non-negative integer representing the min size of a file to cache in bytes.";
 	}
 	return NULL;
 }
@@ -1422,16 +1422,16 @@ static const char *set_cache_maxfs(cmd_parms *parms, void *in_struct_ptr,
 			&crccache_client_module);
 	if (apr_strtoff(&conf->maxfs, arg, NULL, 0) != APR_SUCCESS || conf->maxfs
 			< 0) {
-		return "CacheMaxFileSize argument must be a non-negative integer representing the max size of a file to cache in bytes.";
+		return "CacheMaxFileSizeClient argument must be a non-negative integer representing the max size of a file to cache in bytes.";
 	}
 	return NULL;
 }
 
-static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRoot", set_cache_root, NULL, RSRC_CONF,
-		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevels", set_cache_dirlevels, NULL, RSRC_CONF,
-		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLength", set_cache_dirlength, NULL, RSRC_CONF,
-		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSize", set_cache_minfs, NULL, RSRC_CONF,
-		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSize", set_cache_maxfs, NULL, RSRC_CONF,
+static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRootClient", set_cache_root, NULL, RSRC_CONF,
+		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevelsClient", set_cache_dirlevels, NULL, RSRC_CONF,
+		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLengthClient", set_cache_dirlength, NULL, RSRC_CONF,
+		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSizeClient", set_cache_minfs, NULL, RSRC_CONF,
+		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSizeClient", set_cache_maxfs, NULL, RSRC_CONF,
 		"The maximum file size to cache a document"), { NULL } };
 
 static const cache_provider crccache_client_provider = { &remove_entity,

@@ -24,6 +24,7 @@
 #include "util_charset.h"
 
 #include "crccache.h"
+#include "mod_crccache_server.h"
 
 #include <crcsync/crcsync.h>
 
@@ -34,16 +35,18 @@ module AP_MODULE_DECLARE_DATA crccache_server_module;
 //#define MIN(X,Y) (X<Y?X:Y)
 
 static void *create_config(apr_pool_t *p, server_rec *s) {
-	disk_cache_conf *conf = apr_pcalloc(p, sizeof(disk_cache_conf));
+	crccache_server_conf *conf = apr_pcalloc(p, sizeof(crccache_server_conf));
+	conf->disk_cache_conf = apr_pcalloc(p, sizeof(disk_cache_conf));
 
 	/* XXX: Set default values */
-	conf->dirlevels = DEFAULT_DIRLEVELS;
-	conf->dirlength = DEFAULT_DIRLENGTH;
-	conf->maxfs = DEFAULT_MAX_FILE_SIZE;
-	conf->minfs = DEFAULT_MIN_FILE_SIZE;
+	conf->enabled = 0;
+	conf->disk_cache_conf->dirlevels = DEFAULT_DIRLEVELS;
+	conf->disk_cache_conf->dirlength = DEFAULT_DIRLENGTH;
+	conf->disk_cache_conf->maxfs = DEFAULT_MAX_FILE_SIZE;
+	conf->disk_cache_conf->minfs = DEFAULT_MIN_FILE_SIZE;
 
-	conf->cache_root = NULL;
-	conf->cache_root_len = 0;
+	conf->disk_cache_conf->cache_root = NULL;
+	conf->disk_cache_conf->cache_root_len = 0;
 
 	return conf;
 }
@@ -64,14 +67,27 @@ typedef struct crccache_ctx_t {
  */
 static const char *set_cache_root(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
-			&crccache_server_module);
-	conf->cache_root = arg;
-	conf->cache_root_len = strlen(arg);
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
+				&crccache_server_module);
+	conf->disk_cache_conf->cache_root = arg;
+	conf->disk_cache_conf->cache_root_len = strlen(arg);
 	/* TODO: canonicalize cache_root and strip off any trailing slashes */
 
 	return NULL;
 }
+
+/*
+ * Only enable CRCCache Server when requested through the config file
+ * so that the user can switch CRCCache server on in a specific virtual server
+ */
+static const char *set_crccache_server(cmd_parms *parms, void *dummy, int flag)
+{
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
+				&crccache_server_module);
+	conf->enabled = flag;
+	return NULL;
+}
+
 
 /*
  * Consider eliminating the next two directives in favor of
@@ -81,87 +97,91 @@ static const char *set_cache_root(cmd_parms *parms, void *in_struct_ptr,
  */
 static const char *set_cache_dirlevels(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_server_module);
 	int val = atoi(arg);
 	if (val < 1)
-		return "CacheDirLevels value must be an integer greater than 0";
-	if (val * conf->dirlength > CACHEFILE_LEN)
-		return "CacheDirLevels*CacheDirLength value must not be higher than 20";
-	conf->dirlevels = val;
+		return "CacheDirLevelsServer value must be an integer greater than 0";
+	if (val * conf->disk_cache_conf->dirlength > CACHEFILE_LEN)
+		return "CacheDirLevelsServer*CacheDirLengthServer value must not be higher than 20";
+	conf->disk_cache_conf->dirlevels = val;
 	return NULL;
 }
 static const char *set_cache_dirlength(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_server_module);
 	int val = atoi(arg);
 	if (val < 1)
-		return "CacheDirLength value must be an integer greater than 0";
-	if (val * conf->dirlevels > CACHEFILE_LEN)
-		return "CacheDirLevels*CacheDirLength value must not be higher than 20";
+		return "CacheDirLengthServer value must be an integer greater than 0";
+	if (val * conf->disk_cache_conf->dirlevels > CACHEFILE_LEN)
+		return "CacheDirLevelsServer*CacheDirLengthServer value must not be higher than 20";
 
-	conf->dirlength = val;
+	conf->disk_cache_conf->dirlength = val;
 	return NULL;
 }
 
 static const char *set_cache_minfs(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_server_module);
 
-	if (apr_strtoff(&conf->minfs, arg, NULL, 0) != APR_SUCCESS || conf->minfs
+	if (apr_strtoff(&conf->disk_cache_conf->minfs, arg, NULL, 0) != APR_SUCCESS || conf->disk_cache_conf->minfs
 			< 0) {
-		return "CacheMinFileSize argument must be a non-negative integer representing the min size of a file to cache in bytes.";
+		return "CacheMinFileSizeServer argument must be a non-negative integer representing the min size of a file to cache in bytes.";
 	}
 	return NULL;
 }
 
 static const char *set_cache_maxfs(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_server_module);
-	if (apr_strtoff(&conf->maxfs, arg, NULL, 0) != APR_SUCCESS || conf->maxfs
+	if (apr_strtoff(&conf->disk_cache_conf->maxfs, arg, NULL, 0) != APR_SUCCESS || conf->disk_cache_conf->maxfs
 			< 0) {
-		return "CacheMaxFileSize argument must be a non-negative integer representing the max size of a file to cache in bytes.";
+		return "CacheMaxFileSizeServer argument must be a non-negative integer representing the max size of a file to cache in bytes.";
 	}
 	return NULL;
 }
 
-static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRoot", set_cache_root, NULL, RSRC_CONF,
-		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevels", set_cache_dirlevels, NULL, RSRC_CONF,
-		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLength", set_cache_dirlength, NULL, RSRC_CONF,
-		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSize", set_cache_minfs, NULL, RSRC_CONF,
-		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSize", set_cache_maxfs, NULL, RSRC_CONF,
-		"The maximum file size to cache a document"), { NULL } };
+static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRootServer", set_cache_root, NULL, RSRC_CONF,
+		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevelsServer", set_cache_dirlevels, NULL, RSRC_CONF,
+		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLengthServer", set_cache_dirlength, NULL, RSRC_CONF,
+		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSizeServer", set_cache_minfs, NULL, RSRC_CONF,
+		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSizeServer", set_cache_maxfs, NULL, RSRC_CONF,
+		"The maximum file size to cache a document"), AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF,
+		"Enable the CRCCache server in this virtual server"),{ NULL } };
 
 static ap_filter_rec_t *crccache_out_filter_handle;
 
 static int crccache_server_header_parser_handler(request_rec *r) {
-	//disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
-	//		&crccache_server_module);
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,"check if we have a Block-Hashes header here");
-	const char * hashes, *block_size_header;
-	hashes = apr_table_get(r->headers_in, "Block-Hashes");
-	block_size_header = apr_table_get(r->headers_in, "Block-Size");
-	if (hashes && block_size_header)
+	crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
+			&crccache_server_module);
+	if (conf->enabled)
 	{
-		size_t block_size;
-		int ret = sscanf(block_size_header,"%ld",&block_size);
-		if (ret < 0)
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,"check if we have a Block-Hashes header here");
+		const char * hashes, *block_size_header;
+		hashes = apr_table_get(r->headers_in, "Block-Hashes");
+		block_size_header = apr_table_get(r->headers_in, "Block-Size");
+		if (hashes && block_size_header)
 		{
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "crccache: failed to convert block size header to int, %s",block_size_header);
-			return OK;
+			size_t block_size;
+			int ret = sscanf(block_size_header,"%ld",&block_size);
+			if (ret < 0)
+			{
+				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "crccache: failed to convert block size header to int, %s",block_size_header);
+				return OK;
+			}
+	
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "we have a Block-Hashes header here, we should response in kind: %s",hashes);
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "Need to attache a filter here so we can set the content encoding for the return");
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+					r->server, "Adding CRCCACHE_ENCODE filter for %s",
+					r->uri);
+			ap_add_output_filter_handle(crccache_out_filter_handle,
+					NULL, r, r->connection);
+	
 		}
-
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "we have a Block-Hashes header here, we should response in kind: %s",hashes);
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "Need to attache a filter here so we can set the content encoding for the return");
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
-				r->server, "Adding CRCCACHE_ENCODE filter for %s",
-				r->uri);
-		ap_add_output_filter_handle(crccache_out_filter_handle,
-				NULL, r, r->connection);
-
 	}
 
 	return OK;

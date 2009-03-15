@@ -1,7 +1,9 @@
-ServerName localhost
-CacheEnable crccache_client /
-
 <VirtualHost *:8080>
+	ServerName localhost
+	CacheEnable crccache_client /
+
+        ErrorLog /var/log/apache2/crccache_client.log
+        LogLevel debug
 	ServerAdmin webmaster@localhost
 	ServerName localhost
 
@@ -13,5 +15,4 @@ CacheEnable crccache_client /
 		Deny from all
 		Allow from 127.0.0.1
 	</Proxy> 
-	
 </VirtualHost>
