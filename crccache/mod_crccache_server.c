@@ -172,7 +172,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "crccache: failed to convert block size header to int, %s",block_size_header);
 				return OK;
 			}
-	
+
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "we have a Block-Hashes header here, we should response in kind: %s",hashes);
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "Need to attache a filter here so we can set the content encoding for the return");
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
@@ -180,7 +180,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 					r->uri);
 			ap_add_output_filter_handle(crccache_out_filter_handle,
 					NULL, r, r->connection);
-	
+
 		}
 	}
 
@@ -332,7 +332,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			if (ctx->buffer_count > 0)
 			{
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE literal %ld bytes",ctx->buffer_count);
+					"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
 				unsigned bucket_size = ctx->buffer_count + ENCODING_LITERAL_HEADER_SIZE;
 				ctx->tx_length += bucket_size;
 				char * buf = apr_palloc(r->pool, bucket_size);
@@ -418,7 +418,9 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			if (ctx->buffer_count > 0 || data_left < ctx->block_size)
 			{
 				size_t copy_size = MIN(ctx->block_size*2-ctx->buffer_count,data_left);
-				memcpy(&ctx->buffer[ctx->buffer_count],data,copy_size);
+				memcpy(&ctx->buffer[ctx->buffer_count],&data[bucket_used_count],copy_size);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+											 "crccache: CRCSYNC, copying data on to buffer");
 				ctx->buffer_count += copy_size;
 				bucket_used_count += copy_size;
 				data_left = len - bucket_used_count;
@@ -463,14 +465,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 					buf[0] = ENCODING_LITERAL;
 					*(unsigned *)&buf[1] = htonl(count);
-					if (ctx->buffer_count > 0)
-					{
-						memcpy(&buf[5], ctx->buffer,count);
-					}
-					else
-					{
-						memcpy(&buf[5], &data[bucket_used_count],count);
-					}
+					memcpy(&buf[5],&source_array[source_offset],count);
 
 					apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
@@ -482,6 +477,9 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				unsigned bucket_size = ENCODING_BLOCK_HEADER_SIZE;
 				ctx->tx_length += bucket_size;
 				char * buf = apr_palloc(r->pool, bucket_size);
+
+				// we used a block of data
+				count = ctx->block_size;
 
 				buf[0] = ENCODING_BLOCK;
 				buf[1] = (unsigned char) (result * -1 - 1); // invert and get back to zero based
@@ -509,8 +507,11 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				else
 				{
 					// otherwise memmove the unused data to the start of the buffer
+					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+												 "crccache: CRCSYNC, memmoving buffer");
 					memmove(ctx->buffer,&ctx->buffer[count],ctx->buffer_count - count);
 					ctx->buffer_count -= count;
+					bucket_used_count += count;
 				}
 			}
 			else
