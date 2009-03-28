@@ -2,7 +2,7 @@
  * crccache.c
  *
  *  Created on: 22/02/2009
- *      Author: tcollett
+ *      Author: Toby Collett
  */
 
 #include <string.h>

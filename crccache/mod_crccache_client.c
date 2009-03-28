@@ -14,6 +14,20 @@
  * limitations under the License.
  */
 
+/* crcsync/crccache apache client module
+ *
+ * This module is designed to run as a cache server on the local end of a slow
+ * internet link. This module uses a crc32 running hash algorithm to reduce
+ * data transfer in cached but modified upstream files.
+ *
+ * CRC algorithm uses the crcsync library created by Rusty Russel
+ *
+ * Author: Toby Collett (2009)
+ *
+ */
+
+
+
 #include <assert.h>
 
 #include "apr_file_io.h"
@@ -340,8 +354,6 @@ static int create_entity(cache_handle_t *h, request_rec *r, const char *key,
 	cache_object_t *obj;
 	disk_cache_object_t *dobj;
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "create_entity");
-
 	if (conf->cache_root == NULL) {
 		return DECLINED;
 	}
@@ -377,8 +389,6 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 	cache_info *info;
 	disk_cache_object_t *dobj;
 	int flags;
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "open_entity");
-
 	h->cache_obj = NULL;
 
 	/* Look up entity keyed to 'url' */
@@ -497,7 +507,6 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 static int remove_entity(cache_handle_t *h) {
 	/* Null out the cache object pointer so next time we start from scratch  */
 	h->cache_obj = NULL;
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,"remove_entity" );
 
 	return OK;
 }
@@ -505,8 +514,6 @@ static int remove_entity(cache_handle_t *h) {
 static int remove_url(cache_handle_t *h, apr_pool_t *p) {
 	apr_status_t rc;
 	disk_cache_object_t *dobj;
-
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,"remove_url" );
 
 	/* Get disk cache object from cache handle */
 	dobj = (disk_cache_object_t *) h->cache_obj->vobj;
@@ -596,8 +603,6 @@ static apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
 	int p;
 	apr_status_t rv;
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "read_array");
-
 	while (1) {
 		rv = apr_file_gets(w, MAX_STRING_LEN - 1, file);
 		if (rv != APR_SUCCESS) {
@@ -633,7 +638,6 @@ static apr_status_t store_array(apr_file_t *fd, apr_array_header_t* arr) {
 	struct iovec iov[2];
 	apr_size_t amt;
 	const char **elts;
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,"store)array" );
 
 	elts = (const char **) arr->elts;
 
@@ -663,7 +667,6 @@ static apr_status_t read_table(cache_handle_t *handle, request_rec *r,
 	char *l;
 	int p;
 	apr_status_t rv;
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "read_table");
 
 	while (1) {
 
@@ -754,7 +757,6 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 
 	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "recall_headers");
 
 	/* This case should not happen... */
 	if (!dobj->hfd) {
@@ -769,9 +771,6 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	read_table(h, r, h->resp_hdrs, dobj->hfd);
 	read_table(h, r, h->req_hdrs, dobj->hfd);
 
-	// TODO: JUST FOR DEBUGGING
-	apr_table_set(h->resp_hdrs, "Cache-Control", "max-age=30");
-
 	// TODO: We only really want to add our block hashes if the cache is not fresh
 	// TODO: We could achieve that by adding a filter here on sending the request
 	// and then doing all of this in the filter 'JIT'
@@ -781,17 +780,13 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	/* read */
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-	"crccache: generating hash, read %ld bytes",len);
-
 	// this will be rounded down, but thats okay
 	size_t blocksize = len/BLOCK_COUNT;
 
 	// sanity check for very small files
 	if (blocksize> 4)
 	{
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-		"crccache: %d blocks of %ld bytes",BLOCK_COUNT,blocksize);
+		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: %d blocks of %ld bytes",BLOCK_COUNT,blocksize);
 
 		// add one for base 64 overflow and null terminator
 		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
@@ -806,13 +801,12 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		{
 			// encode the hase into base64;
 			encode_30bithash(crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX]);
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-			"crccache: block %d, hash %08X",i,crcs[i]);
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %08X",i,crcs[i]);
 		}
 		//apr_bucket_delete(e);
 
 		// TODO: do we want to cache the hashes here?
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
+		//ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
 		apr_table_set(r->headers_in, "Block-Hashes", hash_set);
 
 		crccache_client_ctx * ctx;
@@ -840,8 +834,6 @@ static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 	apr_bucket *e;
 	disk_cache_object_t *dobj = (disk_cache_object_t*) h->cache_obj->vobj;
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,"recall_body" );
-
 	e = apr_bucket_file_create(dobj->fd, 0, (apr_size_t) dobj->file_size, p,
 			bb->bucket_alloc);
 
@@ -858,8 +850,6 @@ static apr_status_t store_table(apr_file_t *fd, apr_table_t *table) {
 	struct iovec iov[4];
 	apr_size_t amt;
 	apr_table_entry_t *elts;
-
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,"store_table" );
 
 	elts = (apr_table_entry_t *) apr_table_elts(table)->elts;
 	for (i = 0; i < apr_table_elts(table)->nelts; ++i) {
@@ -891,7 +881,6 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r,
 		cache_info *info) {
 	disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "store_headers");
 
 	apr_status_t rv;
 	apr_size_t amt;
@@ -1249,11 +1238,10 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				else if (data[consumed_bytes] == ENCODING_BLOCK)
 				ctx->state = DECODING_BLOCK_HEADER;
 				else
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+				ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
 						"CRCSYNC-DECODE, unknown section %d(%c)",data[consumed_bytes],data[consumed_bytes]);
 
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCSYNC-DECODE, found a new section %d",ctx->state);
+				//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE, found a new section %d",ctx->state);
 				consumed_bytes++;
 				break;
 				case DECODING_LITERAL_HEADER:
@@ -1329,7 +1317,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				}
 				default:
 				{
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+					ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
 							"CRCSYNC-DECODE, unknown state %d, terminating transaction",ctx->state);
 					apr_brigade_cleanup(bb);
 					return APR_SUCCESS;
@@ -1439,6 +1427,9 @@ static const cache_provider crccache_client_provider = { &remove_entity,
 		&create_entity, &open_entity, &remove_url, };
 
 static void disk_cache_register_hook(apr_pool_t *p) {
+	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
+			"Registering crccache client module, (C) 2009, Toby Collett");
+
 	/* cache initializer */
 	ap_register_provider(p, CACHE_PROVIDER_GROUP, "crccache_client", "0",
 			&crccache_client_provider);

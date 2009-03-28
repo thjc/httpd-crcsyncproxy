@@ -14,6 +14,18 @@
  * limitations under the License.
  */
 
+/* crcsync/crccache apache server module
+ *
+ * This module is designed to run as a proxy server on the remote end of a slow
+ * internet link. This module uses a crc32 running hash algorithm to reduce
+ * data transfer in cached but modified downstream files.
+ *
+ * CRC algorithm uses the crcsync library created by Rusty Russel
+ *
+ * Author: Toby Collett (2009)
+ *
+ */
+
 #include "apr_file_io.h"
 #include "apr_strings.h"
 #include "mod_cache.h"
@@ -159,7 +171,6 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			&crccache_server_module);
 	if (conf->enabled)
 	{
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,"check if we have a Block-Hashes header here");
 		const char * hashes, *block_size_header;
 		hashes = apr_table_get(r->headers_in, "Block-Hashes");
 		block_size_header = apr_table_get(r->headers_in, "Block-Size");
@@ -173,11 +184,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				return OK;
 			}
 
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "we have a Block-Hashes header here, we should response in kind: %s",hashes);
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "Need to attache a filter here so we can set the content encoding for the return");
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
-					r->server, "Adding CRCCACHE_ENCODE filter for %s",
-					r->uri);
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCSYNC: Block-Hashes header found so enabling protocol: %s",hashes);
 			ap_add_output_filter_handle(crccache_out_filter_handle,
 					NULL, r, r->connection);
 
@@ -307,8 +314,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		for (ii = 0; ii < BLOCK_COUNT; ++ii)
 		{
 			ctx->hashes[ii] = decode_30bithash(&hashes[ii*HASH_BASE64_SIZE_TX]);
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						 "cache: decoded hash[%d] %08X",ii,ctx->hashes[ii]);
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "cache: decoded hash[%d] %08X",ii,ctx->hashes[ii]);
 		}
 
 		// now initialise the crcsync context that will do the real work
@@ -331,8 +337,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			// send one last literal if we still have unmatched data
 			if (ctx->buffer_count > 0)
 			{
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
+				//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
 				unsigned bucket_size = ctx->buffer_count + ENCODING_LITERAL_HEADER_SIZE;
 				ctx->tx_length += bucket_size;
 				char * buf = apr_palloc(r->pool, bucket_size);
@@ -350,7 +355,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE complete TX length=%ld original length=%ld",ctx->tx_length, ctx->orig_length);
+				"CRCCACHE-ENCODE complete size %f%% (encoded=%ld original=%ld",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_length, ctx->orig_length);
 
 
 			/* Remove EOS from the old list, and insert into the new. */
@@ -402,8 +407,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 		ctx->orig_length += len;
 
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-			"cache: running CRCCACHE_OUT filter, read %ld bytes",len);
+		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"cache: running CRCCACHE_OUT filter, read %ld bytes",len);
 
 		// TODO: make this a little more efficient so we need to copy less data around
 		size_t bucket_used_count = 0;
@@ -419,8 +423,6 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			{
 				size_t copy_size = MIN(ctx->block_size*2-ctx->buffer_count,data_left);
 				memcpy(&ctx->buffer[ctx->buffer_count],&data[bucket_used_count],copy_size);
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-											 "crccache: CRCSYNC, copying data on to buffer");
 				ctx->buffer_count += copy_size;
 				bucket_used_count += copy_size;
 				data_left = len - bucket_used_count;
@@ -436,8 +438,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			size_t count = crc_read_block(ctx->crcctx, &result,
 					&source_array[source_offset], source_length);;
 
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						 "crccache: CRCSYNC, processed %ld, used %ld bytes, result was %ld",source_length,count,result);
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "crccache: CRCSYNC, processed %ld, used %ld bytes, result was %ld",source_length,count,result);
 
 			// do different things if we match a literal or block
 			if (result > 0)
@@ -457,8 +458,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 				if (count > 0)
 				{
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE literal %ld bytes",count);
+					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE literal %ld bytes",count);
 					unsigned bucket_size = count + ENCODING_LITERAL_HEADER_SIZE;
 					ctx->tx_length += bucket_size;
 					char * buf = apr_palloc(r->pool, bucket_size);
@@ -483,8 +483,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 				buf[0] = ENCODING_BLOCK;
 				buf[1] = (unsigned char) (result * -1 - 1); // invert and get back to zero based
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE block %d",buf[1]);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE block %d",buf[1]);
 				apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
 				APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 			}
@@ -507,8 +506,6 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				else
 				{
 					// otherwise memmove the unused data to the start of the buffer
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-												 "crccache: CRCSYNC, memmoving buffer");
 					memmove(ctx->buffer,&ctx->buffer[count],ctx->buffer_count - count);
 					ctx->buffer_count -= count;
 					bucket_used_count += count;
@@ -529,6 +526,9 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 }
 
 static void disk_cache_register_hook(apr_pool_t *p) {
+	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
+			"Registering crccache server module, (C) 2009, Toby Collett");
+
 	ap_hook_header_parser(crccache_server_header_parser_handler, NULL, NULL,
 			APR_HOOK_MIDDLE);
 

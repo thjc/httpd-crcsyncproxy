@@ -1,8 +1,10 @@
 /*
  * crccache.h
  *
+ * Common files for crccache client and server apache modules
+ *
  *  Created on: 21/02/2009
- *      Author: tcollett
+ *      Author: Toby Collett
  */
 
 #ifndef CRCCACHE_H_
