@@ -337,7 +337,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			// send one last literal if we still have unmatched data
 			if (ctx->buffer_count > 0)
 			{
-				//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
 				unsigned bucket_size = ctx->buffer_count + ENCODING_LITERAL_HEADER_SIZE;
 				ctx->tx_length += bucket_size;
 				char * buf = apr_palloc(r->pool, bucket_size);

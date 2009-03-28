@@ -1306,8 +1306,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 					consumed_bytes += literal_data_len;
 					ctx->processed_length += literal_data_len;
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE, lit, bytes %d, %d %d",literal_data_len, ctx->processed_length, ctx->section_length);
+					//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE, lit, bytes %d, %d %d",literal_data_len, ctx->processed_length, ctx->section_length);
 
 					if (ctx->processed_length == ctx->section_length)
 					{
