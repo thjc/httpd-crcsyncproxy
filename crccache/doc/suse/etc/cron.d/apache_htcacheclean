@@ -1,0 +1,3 @@
+# Clean CRC client cache every 15 minutes, suitable for SuSE 11.1
+# Install this file in /etc/cron.d
+-*/15 * * * * root /bin/sh -c "date ; /usr/sbin/htcacheclean -t -v -p/var/cache/apache2/mod_crccache_client -l100M"  1>>/var/log/apache2/htcacheclean.log 2>&1

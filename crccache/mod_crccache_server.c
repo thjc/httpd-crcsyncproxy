@@ -26,6 +26,7 @@
  *
  */
 
+#include <stdbool.h>
 #include "apr_file_io.h"
 #include "apr_strings.h"
 #include "mod_cache.h"
@@ -39,8 +40,6 @@
 #include "mod_crccache_server.h"
 
 #include <crcsync/crcsync.h>
-
-const int bufferSize = 1024;
 
 module AP_MODULE_DECLARE_DATA crccache_server_module;
 
@@ -65,7 +64,10 @@ static void *create_config(apr_pool_t *p, server_rec *s) {
 
 typedef struct crccache_ctx_t {
 	unsigned char *buffer;
-	size_t buffer_count;
+	size_t buffer_getpos;
+	size_t buffer_putpos;
+	size_t buffer_size;
+	bool matching_blocks;
 	apr_bucket_brigade *bb;
 	size_t block_size;
 	unsigned hashes[BLOCK_COUNT];
@@ -211,6 +213,62 @@ static void crccache_check_etag(request_rec *r, const char *transform) {
 	}
 }
 
+
+/*
+ * Process one block of data: try to match it against the CRC, append
+ * the result to the ouput ring and remember the result (e.g. was
+ * it a block-match or was a literal processed)
+ */
+static void process_block(ap_filter_t *f)
+{
+	request_rec *r = f->r;
+	crccache_ctx *ctx = f->ctx;
+
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE invoking crc_read_block");
+	long result;
+	size_t ndigested = crc_read_block(
+		ctx->crcctx,
+		&result,
+		ctx->buffer+ctx->buffer_getpos,
+		ctx->buffer_putpos-ctx->buffer_getpos
+	);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE crc_read_block ndigested: %ld, result %ld", ndigested, result);
+
+	if (result >= 0)
+	{
+		long count = (result == 0 ? ndigested : result);
+
+		// process literal data
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE literal %ld bytes",count);
+		unsigned bucket_size = count + ENCODING_LITERAL_HEADER_SIZE;
+		ctx->tx_length += bucket_size;
+		char * buf = apr_palloc(r->pool, bucket_size);
+
+		buf[0] = ENCODING_LITERAL;
+		*(unsigned *)&buf[1] = htonl(count);
+		memcpy(buf + ENCODING_LITERAL_HEADER_SIZE, ctx->buffer+ctx->buffer_getpos, count);
+
+		apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
+		APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+	}
+	else
+	{
+		unsigned bucket_size = ENCODING_BLOCK_HEADER_SIZE;
+		ctx->tx_length += bucket_size;
+		char * buf = apr_palloc(r->pool, bucket_size);
+
+		buf[0] = ENCODING_BLOCK;
+		buf[1] = (unsigned char) ((-result)-1); // invert and get back to zero based
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE block %d",buf[1]);
+		apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
+		APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+	}
+	
+	// Update the context with the results
+	ctx->matching_blocks = (result < 0);
+	ctx->buffer_getpos += ndigested;
+}
+
 /*
  * CACHE_OUT filter
  * ----------------
@@ -224,6 +282,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 	/* Do nothing if asked to filter nothing. */
 	if (APR_BRIGADE_EMPTY(bb)) {
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE bucket brigade is empty -> nothing todo");
 		return ap_pass_brigade(f->next, bb);
 	}
 
@@ -295,7 +354,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		block_size_header = apr_table_get(r->headers_in, "Block-Size");
 
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"crccache encoding block size %s", block_size_header);
+				"CRCCACHE-ENCODE encoding block size %s", block_size_header);
 
 		errno=0;
 		ctx->block_size = strtoull(block_size_header,NULL,0);
@@ -306,22 +365,37 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			return ap_pass_brigade(f->next, bb);
 		}
 
-		// allocate a buffer of twice our block size so we can store non matching parts of data as it comes in
-		ctx->buffer_count = 0;
-		ctx->buffer = apr_palloc(r->pool, ctx->block_size*2);
+		// Data come in at chunks that are potentially smaller then block_size
+		// Accumulate those chunks into a buffer.
+		// The buffer must be at least 2*block_size so that crc_read_block(...) can find a matching block, regardless
+		// of the data alignment compared to the original page.
+		// The buffer is basically a moving window in the new page. So sometimes the last part of the buffer must be
+		// copied to the beginning again. The larger the buffer, the less often such a copy operation is required
+		// Though, the larger the buffer, the bigger the memory demand.
+		// A size of 4*block_size (20% of original file size) seems to be a good balance
 
+		// TODO: tune the buffer-size depending on the mime-type. Already compressed data (zip, gif, jpg, mpg, etc) will
+		// probably only have matching blocks if the file is totally unmodified. As soon as one byte differs in the original
+		// uncompressed data, the entire compressed data stream will be different anyway, so in such case it does not make
+		// much sense to even keep invoking the crc_read_block(...) function as soon as a difference has been found.
+		// Hence, no need to make a (potentially huge) buffer for these type of compressed (potentially huge, think about movies)
+		// data types.
+		ctx->buffer_size = ctx->block_size*4; 
+		ctx->buffer_getpos = 0;
+		ctx->buffer_putpos = 0;
+		ctx->matching_blocks = false;
+		ctx->buffer = apr_palloc(r->pool, ctx->buffer_size);
+
+		// Decode the hashes
 		int ii;
 		for (ii = 0; ii < BLOCK_COUNT; ++ii)
 		{
 			ctx->hashes[ii] = decode_30bithash(&hashes[ii*HASH_BASE64_SIZE_TX]);
-			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "cache: decoded hash[%d] %08X",ii,ctx->hashes[ii]);
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE decoded hash[%d] %08X",ii,ctx->hashes[ii]);
 		}
 
 		// now initialise the crcsync context that will do the real work
 		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, BLOCK_COUNT);
-
-
-
 	}
 
 
@@ -334,22 +408,12 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		if (APR_BUCKET_IS_EOS(e))
 		{
-			// send one last literal if we still have unmatched data
-			if (ctx->buffer_count > 0)
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE EOS reached for APR bucket");
+			while (ctx->buffer_getpos < ctx->buffer_putpos)
 			{
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE final literal %ld bytes",ctx->buffer_count);
-				unsigned bucket_size = ctx->buffer_count + ENCODING_LITERAL_HEADER_SIZE;
-				ctx->tx_length += bucket_size;
-				char * buf = apr_palloc(r->pool, bucket_size);
-
-				buf[0] = ENCODING_LITERAL;
-				*(unsigned *)&buf[1] = htonl(ctx->buffer_count);
-				memcpy(&buf[5], ctx->buffer,ctx->buffer_count);
-
-				apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
-				APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+				// There is still data in the buffer. Process it.
+				process_block(f);
 			}
-
 
 			// TODO: add strong hash here
 
@@ -373,10 +437,13 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		if (APR_BUCKET_IS_FLUSH(e))
 		{
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE flush APR bucket");
 			apr_status_t rv;
 
 			/* Remove flush bucket from old brigade and insert into the new. */
 			APR_BUCKET_REMOVE(e);
+			// TODO: optimize; do not insert two consecutive flushes when no intermediate
+			//        output block was written
 			APR_BRIGADE_INSERT_TAIL(ctx->bb, e);
 			rv = ap_pass_brigade(f->next, ctx->bb);
 			if (rv != APR_SUCCESS) {
@@ -386,6 +453,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		}
 
 		if (APR_BUCKET_IS_METADATA(e)) {
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE metadata APR bucket");
 			/*
 			 * Remove meta data bucket from old brigade and insert into the
 			 * new.
@@ -394,10 +462,10 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 			if (len > 2)
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE: Metadata, read %ld, %d %d %d",len,data[0],data[1],data[2]);
+				"CRCCACHE-ENCODE Metadata, read %ld, %d %d %d",len,data[0],data[1],data[2]);
 			else
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-								"CRCCACHE-ENCODE: Metadata, read %ld",len);
+								"CRCCACHE-ENCODE Metadata, read %ld",len);
 			APR_BUCKET_REMOVE(e);
 			APR_BRIGADE_INSERT_TAIL(ctx->bb, e);
 			continue;
@@ -406,119 +474,60 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		/* read */
 		apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 		ctx->orig_length += len;
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE normal data in APR bucket, read %ld", len);
 
-		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"cache: running CRCCACHE_OUT filter, read %ld bytes",len);
-
-		// TODO: make this a little more efficient so we need to copy less data around
+		// append data to the buffer and encode buffer content using the crc_read_block magic
 		size_t bucket_used_count = 0;
-		size_t data_left;
+		// size_t data_left;
+		size_t bucket_data_left;
 		while(bucket_used_count < len)
 		{
-			const char * source_array = data;
-			size_t source_offset = bucket_used_count;
-			data_left = len - bucket_used_count;
-			size_t source_length = data_left;
-			// if we have some data in our buffer, we need to full up the buffer until we have enough to match a block
-			if (ctx->buffer_count > 0 || data_left < ctx->block_size)
+			/* Append as much data as possible into the buffer */
+			bucket_data_left = len - bucket_used_count;
+			size_t copy_size = MIN(ctx->buffer_size-ctx->buffer_putpos, bucket_data_left);
+			memcpy(ctx->buffer+ctx->buffer_putpos, data+bucket_used_count, copy_size);
+			bucket_used_count += copy_size;
+			bucket_data_left -= copy_size;
+			ctx->buffer_putpos += copy_size;
+			/* flush the buffer if it is appropriate */
+			if (ctx->buffer_putpos == ctx->buffer_size)
 			{
-				size_t copy_size = MIN(ctx->block_size*2-ctx->buffer_count,data_left);
-				memcpy(&ctx->buffer[ctx->buffer_count],&data[bucket_used_count],copy_size);
-				ctx->buffer_count += copy_size;
-				bucket_used_count += copy_size;
-				data_left = len - bucket_used_count;
-				source_array = (char *)ctx->buffer;
-				source_offset = 0;
-				source_length = ctx->buffer_count;
-				// not enough to match a block so stop here
-				if (ctx->buffer_count < ctx->block_size)
-					break;
-			}
-
-			long result;
-			size_t count = crc_read_block(ctx->crcctx, &result,
-					&source_array[source_offset], source_length);;
-
-			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "crccache: CRCSYNC, processed %ld, used %ld bytes, result was %ld",source_length,count,result);
-
-			// do different things if we match a literal or block
-			if (result > 0)
-			{
-				// didnt match a block, send a literal
-
-				// if we matched all our data as a literal
-				// update our used byte count, we can only be sure that 1+count-blocksize bytes are not in a block
-				// as the tail end of the buffer could match when more data is added to it.
-				if (count == source_length)
-				{
-					if (count > (ctx->block_size -1))
-						count -=(ctx->block_size -1);
-					else
-						count = 0;
-				}
-
-				if (count > 0)
-				{
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE literal %ld bytes",count);
-					unsigned bucket_size = count + ENCODING_LITERAL_HEADER_SIZE;
-					ctx->tx_length += bucket_size;
-					char * buf = apr_palloc(r->pool, bucket_size);
-
-					buf[0] = ENCODING_LITERAL;
-					*(unsigned *)&buf[1] = htonl(count);
-					memcpy(&buf[5],&source_array[source_offset],count);
-
-					apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
-					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
-				}
-			}
-			else if (result < 0)
-			{
-				// matched send a block
-				unsigned bucket_size = ENCODING_BLOCK_HEADER_SIZE;
-				ctx->tx_length += bucket_size;
-				char * buf = apr_palloc(r->pool, bucket_size);
-
-				// we used a block of data
-				count = ctx->block_size;
-
-				buf[0] = ENCODING_BLOCK;
-				buf[1] = (unsigned char) (result * -1 - 1); // invert and get back to zero based
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE block %d",buf[1]);
-				apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
-				APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
-			}
-			else
-			{
-				// something odd happened here
+				// Buffer is filled to the end. Flush as much as possible
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							 "crccache: CRCSYNC, no data, processed %ld bytes, result was %ld",count,result);
-			}
-
-			if (ctx->buffer_count > 0)
-			{
-				// if we have used up all of our buffer, stop using it and use the bucket directly
-				if (ctx->buffer_count - count < bucket_used_count)
+						"CRCCACHE-ENCODE Buffer is filled to end, getpos: %ld, putpos: %ld, putpos-getpos: %ld (blocksize: %ld)", 
+						ctx->buffer_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_getpos, ctx->block_size);
+				while (ctx->buffer_putpos - ctx->buffer_getpos >= ctx->block_size)
 				{
-					size_t extra_data = ctx->buffer_count - bucket_used_count;
-					bucket_used_count = count - extra_data;
-					ctx->buffer_count = 0;
+					// We can still scan at least 1 block forward: try to flush next part
+					process_block(f);
+					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCCACHE-ENCODE Processed a block, getpos: %ld, putpos: %ld, putpos-getpos: %ld (blocksize: %ld)", 
+						ctx->buffer_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_getpos, ctx->block_size);
 				}
-				else
-				{
-					// otherwise memmove the unused data to the start of the buffer
-					memmove(ctx->buffer,&ctx->buffer[count],ctx->buffer_count - count);
-					ctx->buffer_count -= count;
-					bucket_used_count += count;
-				}
-			}
-			else
-			{
-				bucket_used_count += count;
-			}
 
+				if (ctx->buffer_putpos != ctx->buffer_getpos)
+				{
+					// Copy the remaining part of the buffer to the start of the buffer,
+					// so that it can be filled again as new data arrive
+					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCCACHE-ENCODE Moving %ld bytes to begin of buffer", 
+							ctx->buffer_putpos - ctx->buffer_getpos);
+					memcpy(ctx->buffer, ctx->buffer + ctx->buffer_getpos, ctx->buffer_putpos - ctx->buffer_getpos);
+				}
+				// Reset getpos to the beginning of the buffer and putpos accordingly
+				ctx->buffer_putpos -= ctx->buffer_getpos;
+				ctx->buffer_getpos = 0;
+			}
+			while (ctx->matching_blocks && ctx->buffer_putpos - ctx->buffer_getpos >= ctx->block_size)
+			{
+				// Previous block matched exactly. Let's hope the next block as well
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+						"CRCCACHE-ENCODE Previous block matched, getpos: %ld, putpos: %ld, putpos-getpos: %ld (blocksize: %ld)", 
+						ctx->buffer_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_getpos, ctx->block_size);
+				process_block(f);
+			}
         }
         APR_BUCKET_REMOVE(e);
-
     }
 
     apr_brigade_cleanup(bb);
