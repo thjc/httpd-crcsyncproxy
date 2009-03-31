@@ -35,7 +35,7 @@ it is endian safe, and assumes an input string of 5 bytes
 */
 unsigned decode_30bithash(const char * source)
 {
-	char temp_source[6];
+	char temp_source[9];
 	unsigned char target[7];
 	memcpy(temp_source,source,5);
 	temp_source[5]='0';

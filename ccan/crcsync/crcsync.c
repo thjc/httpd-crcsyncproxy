@@ -192,7 +192,11 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 		if (ctx->literal_bytes > ctx->block_size) {
 			*result = ctx->literal_bytes - ctx->block_size;
 			ctx->literal_bytes -= *result;
-			ctx->buffer_start += *result;
+			/* Advance buffer. */
+			if (*result >= buffer_size(ctx))
+				ctx->buffer_start = ctx->buffer_end = 0;
+			else
+				ctx->buffer_start += *result;
 		} else
 			*result = 0;
 
@@ -206,7 +210,9 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 			ctx->buffer_end -= ctx->buffer_start;
 			ctx->buffer_start = 0;
 		}
-		memcpy(ctx->buffer + ctx->buffer_end, buf, len);
+
+		/* Copy len bytes from tail of buffer. */
+		memcpy(ctx->buffer + ctx->buffer_end, buf + buflen - len, len);
 		ctx->buffer_end += len;
 		assert(buffer_size(ctx) <= ctx->block_size);
 	}
@@ -268,7 +274,7 @@ long crc_read_flush(struct crc_context *ctx)
 	}
 
 	/* We matched (some of) what's left. */
-	ret = -(ctx->num_crcs-1)-1;
+	ret = -((int)ctx->num_crcs-1)-1;
 	ctx->buffer_start += final;
 	ctx->literal_bytes -= final;
 	return ret;
