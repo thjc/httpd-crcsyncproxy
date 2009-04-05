@@ -72,18 +72,14 @@ struct crc_context *crc_context_new(size_t block_size, unsigned crcbits,
 
 	assert(num_crcs > 0);
 	assert(block_size > 0);
-	assert(final_size > 0);
-	assert(final_size <= block_size);
+	assert(final_size < block_size);
 
 	ctx = malloc(sizeof(*ctx) + sizeof(crc[0])*num_crcs);
 	if (ctx) {
 		ctx->block_size = block_size;
-		if (final_size != block_size) {
-			ctx->final_size = final_size;
+		ctx->final_size = final_size; // If it is 0, we never compare against it
+		if (final_size != 0) {
 			ctx->final_crc = crc[--num_crcs];
-		} else {
-			/* If this is 0, we never compare against it. */
-			ctx->final_size = 0;
 		}
 
 		/* Technically, 1 << 32 is undefined. */

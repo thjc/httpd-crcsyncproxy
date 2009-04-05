@@ -23,6 +23,7 @@
  * CRC algorithm uses the crcsync library created by Rusty Russel
  *
  * Author: Toby Collett (2009)
+ * Contributor: Alex Wulms (2009)
  *
  */
 
@@ -97,6 +98,7 @@ typedef enum decoding_state {
 typedef struct crccache_client_ctx_t {
 	apr_bucket_brigade *bb;
 	size_t block_size;
+	size_t final_block_size;
 	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
 
 	decoding_state state;
@@ -782,7 +784,8 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 
 	// this will be rounded down, but thats okay
 	size_t blocksize = len/BLOCK_COUNT;
-
+	size_t final_block_size = len % blocksize;
+	size_t block_count_including_final_block = BLOCK_COUNT + (final_block_size != 0);
 	// sanity check for very small files
 	if (blocksize> 4)
 	{
@@ -791,15 +794,15 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// add one for base 64 overflow and null terminator
 		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
 		// use buffer to set block size first
-		snprintf(hash_set,HASH_HEADER_SIZE,"%ld",blocksize);
-		apr_table_set(r->headers_in, "Block-Size", hash_set);
+		snprintf(hash_set,HASH_HEADER_SIZE,"%ld",len);
+		apr_table_set(r->headers_in, "File-Size", hash_set);
 
-		uint32_t crcs[BLOCK_COUNT+1];
+		uint32_t crcs[block_count_including_final_block];
 		crc_of_blocks(data, len, blocksize, 30, crcs);
 
-		for (i = 0; i < BLOCK_COUNT;++i)
+		for (i = 0; i < block_count_including_final_block;++i)
 		{
-			// encode the hase into base64;
+			// encode the hash into base64;
 			encode_30bithash(crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX]);
 			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %08X",i,crcs[i]);
 		}
@@ -813,6 +816,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		ctx = apr_pcalloc(r->pool, sizeof(*ctx));
 		ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 		ctx->block_size = blocksize;
+		ctx->final_block_size = final_block_size;
 		ctx->state = DECODING_NEW_SECTION;
 		ctx->cached_bucket = e;
 
@@ -1281,16 +1285,17 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					ctx->state = DECODING_NEW_SECTION;
 
 					// TODO: Output the indicated block here
+					size_t current_block_size = block_number < BLOCK_COUNT ? ctx->block_size : ctx->final_block_size;
 					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE, block section, block %d",block_number);
+							"CRCSYNC-DECODE, block section, block %d, size %ld",block_number, current_block_size);
 
-					char * buf = apr_palloc(r->pool, ctx->block_size);
+					char * buf = apr_palloc(r->pool, current_block_size);
 					const char * source_data;
 					size_t source_len;
 					apr_bucket_read(ctx->cached_bucket, &source_data, &source_len, APR_BLOCK_READ);
-					assert(source_len >= ctx->block_size*block_number);
-					memcpy(buf,&source_data[block_number*ctx->block_size],ctx->block_size);
-					apr_bucket * b = apr_bucket_pool_create(buf, ctx->block_size, r->pool, f->c->bucket_alloc);
+					assert(block_number < (BLOCK_COUNT + (ctx->final_block_size != 0)));
+					memcpy(buf,&source_data[block_number*ctx->block_size],current_block_size);
+					apr_bucket * b = apr_bucket_pool_create(buf, current_block_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 
 					break;

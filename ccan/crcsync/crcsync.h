@@ -22,8 +22,8 @@ void crc_of_blocks(const void *data, size_t len, unsigned int blocksize,
  * @blocksize: the sie of each block
  * @crcbits: the bits valid in the CRCs (<= 32)
  * @crc: array of block crcs
- * @num_crcs: number of block crcs
- * @final_size: the final block size (<= blocksize).
+ * @num_crcs: number of block crcs (including final block if final_size > 0)
+ * @final_size: the final block size (0 <= final_size < blocksize).
  *
  * Returns an allocated pointer to the structure for crc_find_block,
  * or NULL.  Makes a copy of @crc and @num_crcs.
