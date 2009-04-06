@@ -1,7 +1,18 @@
 <VirtualHost *:8080>
 	ServerName localhost
 	CacheEnable crccache_client /
-
+	CacheIgnoreCacheControl on
+	CacheIgnoreNoLastMod on
+	CacheDefaultExpire 0
+	CacheIgnoreQueryString on
+        # warning: enabling CacheStoreNoStore might store sensitive info in the cache
+	# CacheStoreNoStore on
+	# warning: enabling CacheStorePrivate data will store private data in the cache
+	#  ideally this should only be done for a private cache and not for a shared cache
+	#  in a proxy. However, nowadays, many dynamic sites use 'private' caching 
+	#  to prevent any caching at all, which breaks the whole idea of using http-rsync
+	#  based delta updates
+	CacheStorePrivate on
         ErrorLog /var/log/apache2/crccache_client.log
         LogLevel debug
 	ServerAdmin webmaster@localhost
