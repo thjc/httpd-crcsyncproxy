@@ -72,8 +72,8 @@ typedef struct crccache_ctx_t {
 	size_t crc_read_block_ndigested;
 	apr_bucket_brigade *bb;
 	size_t block_size;
-	size_t final_block_size;
-	unsigned hashes[BLOCK_COUNT+1];
+	size_t tail_block_size;
+	unsigned hashes[FULL_BLOCK_COUNT+1];
 	struct crc_context *crcctx;
 	size_t orig_length;
 	size_t tx_length;
@@ -298,7 +298,7 @@ static void process_block(ap_filter_t *f)
 	{
 		write_block_reference(f, result);
 		unsigned char blocknum = (unsigned char) ((-result)-1);
-		ctx->buffer_read_getpos += (blocknum == BLOCK_COUNT) ? ctx->final_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
 	}
 	
 	// Update the context with the results
@@ -339,7 +339,7 @@ static void flush_block(ap_filter_t *f)
 	{
 		write_block_reference(f, result);
 		unsigned char blocknum = (unsigned char) ((-result)-1);
-		ctx->buffer_read_getpos += (blocknum == BLOCK_COUNT) ? ctx->final_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
 	}
 	
 	// Update the context with the results
@@ -448,9 +448,9 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
-		ctx->block_size = file_size/BLOCK_COUNT;
-		ctx->final_block_size = file_size % ctx->block_size;
-		size_t block_count_including_final_block = BLOCK_COUNT + (ctx->final_block_size != 0);
+		ctx->block_size = file_size/FULL_BLOCK_COUNT;
+		ctx->tail_block_size = file_size % FULL_BLOCK_COUNT;
+		size_t block_count_including_final_block = FULL_BLOCK_COUNT + (ctx->tail_block_size != 0);
 
 		// Data come in at chunks that are potentially smaller then block_size
 		// Accumulate those chunks into a buffer.
@@ -483,7 +483,7 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		}
 
 		// now initialise the crcsync context that will do the real work
-		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, block_count_including_final_block, ctx->final_block_size);
+		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, block_count_including_final_block, ctx->tail_block_size);
 	}
 
 
