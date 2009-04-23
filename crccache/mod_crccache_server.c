@@ -37,6 +37,7 @@
 #include "util_charset.h"
 
 #include "crccache.h"
+#include "ap_wrapper.h"
 #include "mod_crccache_server.h"
 
 #include <crcsync/crcsync.h>
@@ -182,7 +183,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 		if (hashes && file_size_header)
 		{
 			size_t file_size;
-			int ret = sscanf(file_size_header,"%ld",&file_size);
+			int ret = sscanf(file_size_header,"%zu",&file_size);
 			if (ret < 0)
 			{
 				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "crccache: failed to convert file size header to size_t, %s",file_size_header);
@@ -282,7 +283,8 @@ static void process_block(ap_filter_t *f)
 		ctx->buffer+ctx->buffer_digest_getpos,
 		ctx->buffer_putpos-ctx->buffer_digest_getpos
 	);
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE crc_read_block ndigested: %ld, result %ld", ndigested, result);
+	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+			"CRCCACHE-ENCODE crc_read_block ndigested: %zu, result %ld", ndigested, result);
 
 	
 	// result = 0: do nothing (it is a 'literal' block of exactly 'blocksize' bytes at the end of the buffer, it will have to be moved
@@ -525,8 +527,8 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			// TODO: add strong hash here
 
 
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE complete size %f%% (encoded=%ld original=%ld",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_length, ctx->orig_length);
+			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+				"CRCCACHE-ENCODE complete size %f%% (encoded=%zu original=%zu",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_length, ctx->orig_length);
 
 
 			/* Remove EOS from the old list, and insert into the new. */
@@ -568,11 +570,11 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			// TODO: do we need to encode metadata
 			apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 			if (len > 2)
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE Metadata, read %ld, %d %d %d",len,data[0],data[1],data[2]);
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+				"CRCCACHE-ENCODE Metadata, read %zu, %d %d %d",len,data[0],data[1],data[2]);
 			else
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-								"CRCCACHE-ENCODE Metadata, read %ld",len);
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+								"CRCCACHE-ENCODE Metadata, read %zu",len);
 			APR_BUCKET_REMOVE(e);
 			APR_BRIGADE_INSERT_TAIL(ctx->bb, e);
 			continue;
@@ -600,15 +602,15 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			if (ctx->buffer_putpos == ctx->buffer_size)
 			{
 				// Buffer is filled to the end. Flush as much as possible
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %ld, digest_getpos: %ld, putpos: %ld, putpos-digest_getpos: %ld (blocksize: %ld)", 
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+						"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
 						ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 				while (ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->block_size)
 				{
 					// We can still scan at least 1 block + 1 byte forward: try to flush next part
 					process_block(f);
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCCACHE-ENCODE Processed a block, read_getpos: %ld, digest_getpos: %ld, putpos: %ld, putpos-digest_getpos: %ld (blocksize: %ld)", 
+					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
 						ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 				}
 
@@ -617,8 +619,8 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					// Copy the remaining part of the buffer to the start of the buffer,
 					// so that it can be filled again as new data arrive
 					
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCCACHE-ENCODE Moving %ld bytes to begin of buffer", 
+					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCCACHE-ENCODE Moving %zu bytes to begin of buffer", 
 							ctx->buffer_putpos - ctx->buffer_read_getpos);
 					memcpy(ctx->buffer, ctx->buffer + ctx->buffer_read_getpos, ctx->buffer_putpos - ctx->buffer_read_getpos);
 				}
@@ -630,8 +632,8 @@ static int crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			while (ctx->crc_read_block_result < 0 && ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->block_size)
 			{
 				// Previous block matched exactly. Let's hope the next block as well
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Previous block matched, read_getpos: %ld, digest_getpos: %ld, putpos: %ld, putpos-digest_getpos: %ld (blocksize: %ld)", 
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+						"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
 						ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 				process_block(f);
 			}

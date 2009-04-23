@@ -41,6 +41,7 @@
 #include "util_charset.h"
 
 #include "crccache.h"
+#include "ap_wrapper.h"
 #include <crcsync/crcsync.h>
 
 /*
@@ -794,7 +795,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// add one for base 64 overflow and null terminator
 		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
 		// use buffer to set block size first
-		snprintf(hash_set,HASH_HEADER_SIZE,"%ld",len);
+		snprintf(hash_set,HASH_HEADER_SIZE,"%zu",len);
 		apr_table_set(r->headers_in, "File-Size", hash_set);
 
 		uint32_t crcs[block_count_including_final_block];
@@ -1286,8 +1287,8 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 					// TODO: Output the indicated block here
 					size_t current_block_size = block_number < FULL_BLOCK_COUNT ? ctx->block_size : ctx->tail_block_size;
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE, block section, block %d, size %ld",block_number, current_block_size);
+					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCSYNC-DECODE, block section, block %d, size %zu" ,block_number, current_block_size);
 
 					char * buf = apr_palloc(r->pool, current_block_size);
 					const char * source_data;
