@@ -1,3 +1,11 @@
-The module should work with a standard ubuntu apache install (thats my test setup), I have included the files I have
+The module should work with a standard ubuntu apache install (thats my (Toby's) test setup), I have included the files I have
 added or changed under etc in this doc dir.
+
+Note that you must set-up something to load module 'module_deflate', if that is not done standard
+module_deflate gets used in the upstream proxy, to unzip 'gzip' encoded data before they are
+enhandled to the crccache_server module for the delta-encoding
+
+Note that you must enter following command to enable the upstream proxy after you have
+copied the above mentioned files into the standard ubuntu apache install:
+sudo a2ensite upstream-proxy
 

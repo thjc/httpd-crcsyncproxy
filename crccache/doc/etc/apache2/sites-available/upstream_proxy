@@ -1,13 +1,11 @@
 <VirtualHost *:8081>
-	#ServerName localhost
-	#CacheEnable crccache_server /
-
         ErrorLog /var/log/apache2/crccache_server.log
         LogLevel debug
 
 	ServerAdmin webmaster@localhost
 	ServerName localhost
 
+	SetOutputFilter INFLATE
 	CRCcacheServer On
 
 	ProxyRequests On

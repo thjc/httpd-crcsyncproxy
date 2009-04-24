@@ -2,7 +2,7 @@ The test setup I have been using has apache setup as two proxy servers, one on p
 
 The proxy on port 8080 is set up with mod_crccache_client as a cache provider with 8081 as an upstream proxy for it
 
-The proxy on port 8081 is set up with mod_crccache_server and fetches the pages directly.
+The proxy on port 8081 is set up with mod_crccache_server and mod_deflate and fetches the pages directly.
 
 For debugging it is useful to set max clients to 2 on the apache server so you can gdb attach to the processes if needed.
 
