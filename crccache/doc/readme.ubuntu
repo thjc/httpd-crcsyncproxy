@@ -9,4 +9,3 @@ for the delta calculation
 Note that you must enter following command to enable the upstream proxy after you have
 copied the above mentioned files into the standard ubuntu apache install:
 sudo a2ensite upstream-proxy
-

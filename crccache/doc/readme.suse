@@ -21,4 +21,3 @@ NameVirtualHost *:8081
 5) setup cache cleanup:
 copy file <this-doc-dir>/suse/etc/cron.d/apache_htcacheclean to /etc/cron.d
 
-
