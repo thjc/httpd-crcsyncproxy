@@ -1,12 +1,24 @@
 <VirtualHost *:8080>
 	ServerName localhost
+
+	# Make sure that gzip/deflate encoding
+	# is removed from the content before it is stored
+	# in the cache. Otherwise, crccache won't have a good
+	# basis for the crcsync based delta handling
+	SetOutputFilter INFLATE
+
+	# Enable the crccache_client, which does the real work
 	CacheEnable crccache_client /
+	# Force the cache to store as much as possible
+	# so that the chance for crccache of having a 
+	# suitable base-page for the delta request is
+	# maximized
 	CacheIgnoreCacheControl on
 	CacheIgnoreNoLastMod on
 	CacheDefaultExpire 0
 	CacheIgnoreQueryString on
         # warning: enabling CacheStoreNoStore might store sensitive info in the cache
-	# CacheStoreNoStore on
+	CacheStoreNoStore on
 	# warning: enabling CacheStorePrivate data will store private data in the cache
 	#  ideally this should only be done for a private cache and not for a shared cache
 	#  in a proxy. However, nowadays, many dynamic sites use 'private' caching 

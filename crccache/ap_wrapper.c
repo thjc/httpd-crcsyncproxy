@@ -21,3 +21,18 @@ void ap_log_error_wrapper(const char *file, int line, int level, apr_status_t st
 	vsnprintf(msg, sizeof(msg), fmt, ap);
 	ap_log_error(file, line, level, status, s, "%s", msg);
 }
+
+void ap_log_hex(const char *file, int line, int level, apr_status_t status, const server_rec *s, unsigned char *buf, size_t len)
+{
+	size_t cnt;
+	for (cnt=0; cnt < len; cnt += 32)
+	{
+		size_t cnt2;
+		char hexbuf[3*32+1];
+		for (cnt2=cnt; cnt2 != cnt+32 && cnt2 != len; cnt2++)
+		{
+			sprintf(hexbuf+3*(cnt2-cnt), "%02x.", buf[cnt2]);
+		}
+		ap_log_error(file, line, level, status, s, "%s", hexbuf);
+	}
+}

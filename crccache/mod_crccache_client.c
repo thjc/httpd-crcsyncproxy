@@ -43,6 +43,7 @@
 #include "crccache.h"
 #include "ap_wrapper.h"
 #include <crcsync/crcsync.h>
+#include "zlib.h"
 
 /*
  * mod_disk_cache: Disk Based HTTP 1.1 Cache.
@@ -90,11 +91,15 @@ static ap_filter_rec_t *crccache_decode_filter_handle;
 
 typedef enum decoding_state {
 	DECODING_NEW_SECTION,
-	DECODING_LITERAL_HEADER,
-	DECODING_LITERAL,
+	DECODING_COMPRESSED,
 	DECODING_BLOCK_HEADER,
 	DECODING_BLOCK
 } decoding_state;
+
+typedef enum {
+	DECOMPRESSION_INITIALIZED,
+	DECOMPRESSION_ENDED
+} decompression_state_t;
 
 typedef struct crccache_client_ctx_t {
 	apr_bucket_brigade *bb;
@@ -103,9 +108,8 @@ typedef struct crccache_client_ctx_t {
 	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
 
 	decoding_state state;
-	unsigned section_length;
-	unsigned processed_length;
-	char section_header[4];
+	decompression_state_t decompression_state;
+	z_stream *decompression_stream;
 } crccache_client_ctx;
 
 /*
@@ -745,18 +749,39 @@ static apr_status_t read_table(cache_handle_t *handle, request_rec *r,
     return APR_SUCCESS;
 }
 
-	/*
-	 * Reads headers from a buffer and returns an array of headers.
-	 * Returns NULL on file error
-	 * This routine tries to deal with too long lines and continuation lines.
-	 * @@@: XXX: FIXME: currently the headers are passed thru un-merged.
-	 * Is that okay, or should they be collapsed where possible?
-	 */
+/**
+ * Clean-up memory used by helper libraries, that don't know about apr_palloc
+ * and that (probably) use classical malloc/free
+ */
+static apr_status_t deflate_ctx_cleanup(void *data)
+{
+	crccache_client_ctx *ctx = (crccache_client_ctx *)data;
+
+	if (ctx != NULL)
+	{
+		if (ctx->decompression_state != DECOMPRESSION_ENDED)
+		{
+			inflateEnd(ctx->decompression_stream);
+			ctx->decompression_state = DECOMPRESSION_ENDED;
+		}
+	}
+	return APR_SUCCESS;
+}
+
+
+/*
+ * Reads headers from a buffer and returns an array of headers.
+ * Returns NULL on file error
+ * This routine tries to deal with too long lines and continuation lines.
+ * @@@: XXX: FIXME: currently the headers are passed thru un-merged.
+ * Is that okay, or should they be collapsed where possible?
+ */
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	const char *data;
 	apr_size_t len;
 	apr_bucket *e;
 	unsigned i;
+	int z_RC;
 
 	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
 
@@ -792,6 +817,37 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	{
 		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: %d blocks of %ld bytes",FULL_BLOCK_COUNT,blocksize);
 
+		crccache_client_ctx * ctx;
+		ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+		ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+		ctx->block_size = blocksize;
+		ctx->tail_block_size = tail_block_size;
+		ctx->state = DECODING_NEW_SECTION;
+		ctx->cached_bucket = e;
+		
+		// Setup inflate for decompressing non-matched literal data
+		ctx->decompression_stream = apr_palloc(r->pool, sizeof(*(ctx->decompression_stream)));
+		ctx->decompression_stream->zalloc = Z_NULL;
+		ctx->decompression_stream->zfree = Z_NULL;
+		ctx->decompression_stream->opaque = Z_NULL;
+		ctx->decompression_stream->avail_in = 0;
+		ctx->decompression_stream->next_in = Z_NULL;
+		z_RC = inflateInit(ctx->decompression_stream);
+		if (z_RC != Z_OK)
+		{
+			ap_log_error(APLOG_MARK, APLOG_WARNING, 0, r->server,
+			"Can not initialize decompression engine, return code: %d", z_RC);
+			return APR_SUCCESS;
+		}
+		ctx->decompression_state = DECOMPRESSION_INITIALIZED;
+
+		// Register a cleanup function to cleanup internal libz resources
+		apr_pool_cleanup_register(r->pool, ctx, deflate_ctx_cleanup,
+                                  apr_pool_cleanup_null);
+
+		// All OK to go for the crcsync decoding: add the headers
+		// and set-up the decoding filter
+
 		// add one for base 64 overflow and null terminator
 		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
 		// use buffer to set block size first
@@ -808,18 +864,10 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %08X",i,crcs[i]);
 		}
 		//apr_bucket_delete(e);
+		apr_table_set(r->headers_in, "Block-Hashes", hash_set);
 
 		// TODO: do we want to cache the hashes here?
 		//ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
-		apr_table_set(r->headers_in, "Block-Hashes", hash_set);
-
-		crccache_client_ctx * ctx;
-		ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-		ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-		ctx->block_size = blocksize;
-		ctx->tail_block_size = tail_block_size;
-		ctx->state = DECODING_NEW_SECTION;
-		ctx->cached_bucket = e;
 
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
@@ -827,6 +875,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		ap_add_output_filter_handle(crccache_decode_filter_handle,
 		ctx, r, r->connection);
 
+		// TODO: why is hfd file only closed in this case?
 		apr_file_close(dobj->hfd);
 	}
 	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
@@ -1135,12 +1184,12 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r,
 	return APR_SUCCESS;
 }
 
-			/*
-			 * CACHE_DECODE filter
-			 * ----------------
-			 *
-			 * Deliver cached content (headers and body) up the stack.
-			 */
+/*
+ * CACHE_DECODE filter
+ * ----------------
+ *
+ * Deliver cached content (headers and body) up the stack.
+ */
 static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	apr_bucket *e;
 	request_rec *r = f->r;
@@ -1171,7 +1220,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	 */
 	if (!ctx) {
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"No context availavle %s", r->uri);
+				"No context available %s", r->uri);
 		ap_remove_output_filter(f);
 		return ap_pass_brigade(f->next, bb);
 	}
@@ -1179,7 +1228,6 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	while (!APR_BRIGADE_EMPTY(bb))
 	{
 		const char *data;
-		//        apr_bucket *b;
 		apr_size_t len;
 
 		e = APR_BRIGADE_FIRST(bb);
@@ -1226,59 +1274,34 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		/* read */
 		apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
+		//ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE read %zd bytes",len);
 
-		size_t consumed_bytes = 0;
+		apr_size_t consumed_bytes = 0;
 		while (consumed_bytes < len)
 		{
+			//ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE remaining %zd bytes",len - consumed_bytes);
 			// no guaruntee that our buckets line up with our encoding sections
 			// so we need a processing state machine stored in our context
 			switch (ctx->state)
 			{
 				case DECODING_NEW_SECTION:
-				ctx->processed_length = 0;
-
-				// check if we have a literal section or a block section
-				if (data[consumed_bytes] == ENCODING_LITERAL)
-				ctx->state = DECODING_LITERAL_HEADER;
-				else if (data[consumed_bytes] == ENCODING_BLOCK)
-				ctx->state = DECODING_BLOCK_HEADER;
-				else
-				ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
-						"CRCSYNC-DECODE, unknown section %d(%c)",data[consumed_bytes],data[consumed_bytes]);
-
-				//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE, found a new section %d",ctx->state);
-				consumed_bytes++;
-				break;
-				case DECODING_LITERAL_HEADER:
-				// how long a literal do we have
-				if (ctx->processed_length == 0 && (len-consumed_bytes)>=4)
 				{
-					ctx->section_length = ntohl(*(unsigned long*)&data[consumed_bytes]);
-					consumed_bytes+=4;
-					ctx->state = DECODING_LITERAL;
-					ctx->processed_length = 0;
-					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE, lit section, length %d",ctx->section_length);
+					// check if we have a compressed section or a block section
+					if (data[consumed_bytes] == ENCODING_COMPRESSED)
+					ctx->state = DECODING_COMPRESSED;
+					else if (data[consumed_bytes] == ENCODING_BLOCK)
+					ctx->state = DECODING_BLOCK_HEADER;
+					else
+					{
+						ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
+								"CRCSYNC-DECODE, unknown section %d(%c)",data[consumed_bytes],data[consumed_bytes]);
+						apr_brigade_cleanup(bb);
+						return APR_EGENERAL;
+					}
+					//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE found a new section %d",ctx->state);
+					consumed_bytes++;
 					break;
 				}
-				else
-				{
-					// we didnt get the whole length in one go, so assemble it in our ctx buffer
-					int remaining_header_count = MIN(len - consumed_bytes, 4 - ctx->processed_length);
-					memcpy(&ctx->section_header[ctx->processed_length],&data[consumed_bytes],remaining_header_count);
-					ctx->processed_length += remaining_header_count;
-					consumed_bytes += remaining_header_count;
-					if (ctx->processed_length == 4)
-					{
-						ctx->section_length = ntohl(*(unsigned long*)&data[consumed_bytes]);
-						ctx->state = DECODING_LITERAL;
-						ctx->processed_length = 0;
-						ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-								"CRCSYNC-DECODE, literal section, lenfth %d",ctx->section_length);
-						break;
-					}
-				}
-				break;
 				case DECODING_BLOCK_HEADER:
 				{
 					unsigned char block_number = data[consumed_bytes];
@@ -1288,7 +1311,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					// TODO: Output the indicated block here
 					size_t current_block_size = block_number < FULL_BLOCK_COUNT ? ctx->block_size : ctx->tail_block_size;
 					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE, block section, block %d, size %zu" ,block_number, current_block_size);
+							"CRCSYNC-DECODE block section, block %d, size %zu" ,block_number, current_block_size);
 
 					char * buf = apr_palloc(r->pool, current_block_size);
 					const char * source_data;
@@ -1298,25 +1321,46 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					memcpy(buf,&source_data[block_number*ctx->block_size],current_block_size);
 					apr_bucket * b = apr_bucket_pool_create(buf, current_block_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
-
 					break;
 				}
-				case DECODING_LITERAL:
+				case DECODING_COMPRESSED:
 				{
-					unsigned literal_data_len = MIN(len - consumed_bytes, ctx->section_length - ctx->processed_length);
-					// TODO dump literal data here
-					char * buf = apr_palloc(r->pool, literal_data_len);
-					memcpy(buf,&data[consumed_bytes],literal_data_len);
-					apr_bucket * b = apr_bucket_pool_create(buf, literal_data_len, r->pool, f->c->bucket_alloc);
-					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
-
-					consumed_bytes += literal_data_len;
-					ctx->processed_length += literal_data_len;
-					//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE, lit, bytes %d, %d %d",literal_data_len, ctx->processed_length, ctx->section_length);
-
-					if (ctx->processed_length == ctx->section_length)
+					unsigned char decompressed_data_buf[30000];
+					int z_RC;
+					z_stream *strm = ctx->decompression_stream;
+					strm->avail_in = len - consumed_bytes;
+					strm->next_in = (Bytef *)(data + consumed_bytes);
+					// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCSYNC-DECODE inflating %d bytes", strm.avail_in);
+					// ap_log_hex(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, strm.next_in, strm.avail_in);
+					do {
+						strm->avail_out = sizeof(decompressed_data_buf);
+						strm->next_out = decompressed_data_buf;
+						uInt avail_in_pre_inflate = strm->avail_in;
+						z_RC = inflate(strm, Z_NO_FLUSH);
+						if (z_RC == Z_NEED_DICT || z_RC == Z_DATA_ERROR || z_RC == Z_MEM_ERROR)
+						{
+							ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, r->server, "CRCSYNC-DECODE inflate error: %d", z_RC);
+							apr_brigade_cleanup(bb);
+							return APR_EGENERAL;
+						}
+						int have = sizeof(decompressed_data_buf) - strm->avail_out;
+						ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, 
+								"CRCSYNC-DECODE inflate rslt %d, consumed %d, produced %d",
+								z_RC, avail_in_pre_inflate - strm->avail_in, have);
+						if (have)
+						{
+							// write output data
+							char * buf = apr_palloc(r->pool, have);
+							memcpy(buf,decompressed_data_buf,have);
+							apr_bucket * b = apr_bucket_pool_create(buf, have, r->pool, f->c->bucket_alloc);
+							APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+						}
+					} while (strm->avail_out == 0);
+					consumed_bytes = len - strm->avail_in;
+					if (z_RC == Z_STREAM_END)
 					{
 						ctx->state = DECODING_NEW_SECTION;
+						inflateReset(strm);
 					}
 					break;
 				}
@@ -1325,7 +1369,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
 							"CRCSYNC-DECODE, unknown state %d, terminating transaction",ctx->state);
 					apr_brigade_cleanup(bb);
-					return APR_SUCCESS;
+					return APR_EGENERAL; // TODO: figure out how to pass the error on to the client
 				}
 			}
 			APR_BUCKET_REMOVE(e);
