@@ -5,6 +5,8 @@ Note that you must set-up something to load module 'mod_deflate', if that is not
 mod_deflate gets used in the in the client proxy, to unzip 'gzip' encoded data before they are
 stored in the cache, so that on the next request, an non-compressed page  can be used as basis
 for the delta calculation
+use "sudo a2enmod deflate" to enable the deflate module
+
 
 Note that you must enter following command to enable the upstream proxy after you have
 copied the above mentioned files into the standard ubuntu apache install:
