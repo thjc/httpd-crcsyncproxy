@@ -189,11 +189,12 @@ static ap_filter_rec_t *crccache_out_filter_handle;
 static int crccache_server_header_parser_handler(request_rec *r) {
 	crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_server_module);
+	int status = OK;
 	if (conf->enabled)
 	{
 		const char * hashes, *file_size_header;
-		hashes = apr_table_get(r->headers_in, "Block-Hashes");
-		file_size_header = apr_table_get(r->headers_in, "File-Size");
+		hashes = apr_table_get(r->headers_in, BLOCK_HEADER);
+		file_size_header = apr_table_get(r->headers_in, FILE_SIZE_HEADER);
 		if (hashes && file_size_header)
 		{
 			size_t file_size;
@@ -204,7 +205,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				return OK;
 			}
 
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block-Hashes header found so enabling protocol: %s",hashes);
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
 			// Insert mod_deflate's INFLATE filter in the chain to unzip content
 			// so that there is clear text available for the delta algorithm
 			ap_filter_t *inflate_filter = ap_add_output_filter("INFLATE", NULL, r, r->connection);
@@ -219,10 +220,12 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			// And the crccache filter itself ofcourse
 			ap_add_output_filter_handle(crccache_out_filter_handle,
 					NULL, r, r->connection);
+			//r->status=226;
+			status = OK;
 		}
 	}
 
-	return OK;
+	return status;
 }
 
 /* PR 39727: we're screwing up our clients if we leave a strong ETag
@@ -252,7 +255,7 @@ static apr_status_t write_compress_buffer(ap_filter_t *f, int flush)
 
 	if (ctx->debug_skip_writing)
 		return APR_SUCCESS;
-	
+
 	do
 	{
 		strm->avail_out = sizeof(compress_buf);
@@ -303,7 +306,7 @@ static apr_status_t write_compress_buffer(ap_filter_t *f, int flush)
 
 	return APR_SUCCESS;
 }
-	
+
 
 static apr_status_t flush_compress_buffer(ap_filter_t *f)
 {
@@ -312,7 +315,7 @@ static apr_status_t flush_compress_buffer(ap_filter_t *f)
 
 	if (ctx->debug_skip_writing)
 		return APR_SUCCESS;
-	
+
 	if (ctx->compression_state != COMPRESSION_BUFFER_EMPTY)
 	{
 		rslt = write_compress_buffer(f, Z_FINISH); // take the real status
@@ -332,7 +335,7 @@ static apr_status_t write_literal(ap_filter_t *f, unsigned char *buffer, long co
 
 	if (ctx->debug_skip_writing)
 		return APR_SUCCESS;
-	
+
 	apr_status_t rslt;
 	if (ctx->compression_state == COMPRESSION_BUFFER_EMPTY)
 	{
@@ -363,7 +366,7 @@ static apr_status_t write_block_reference(ap_filter_t *f, long result)
 
 	if (ctx->debug_skip_writing)
 		return APR_SUCCESS;
-	
+
 	unsigned bucket_size = ENCODING_BLOCK_HEADER_SIZE;
 	ctx->tx_length += bucket_size;
 	ctx->tx_uncompressed_length += bucket_size;
@@ -395,7 +398,7 @@ static apr_status_t process_block(ap_filter_t *f)
 		ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,"CRCCACHE-ENCODE crcctx = null");
 		return APR_EGENERAL;
 	}
-	
+
 	long rd_block_rslt;
 	size_t ndigested = crc_read_block(
 		ctx->crcctx,
@@ -406,7 +409,7 @@ static apr_status_t process_block(ap_filter_t *f)
 	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
 			"CRCCACHE-ENCODE crc_read_block ndigested: %zu, result %ld", ndigested, rd_block_rslt);
 
-	
+
 	// rd_block_rslt = 0: do nothing (it is a 'literal' block of exactly 'blocksize' bytes at the end of the buffer, it will have to be moved
 	//  to the beginning of the moving window so that it can be written upon the next call to crc_read_block or crc_read_flush)
 	// rd_block_rslt > 0: send literal
@@ -422,7 +425,7 @@ static apr_status_t process_block(ap_filter_t *f)
 		unsigned char blocknum = (unsigned char) ((-rd_block_rslt)-1);
 		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
 	}
-	
+
 	// Update the context with the results
 	ctx->crc_read_block_result = rd_block_rslt;
 	ctx->crc_read_block_ndigested = ndigested;
@@ -440,7 +443,7 @@ static apr_status_t flush_block(ap_filter_t *f)
 	request_rec *r = f->r;
 	crccache_ctx *ctx = f->ctx;
 	apr_status_t rslt = APR_SUCCESS;
-	
+
 	// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE invoking crc_read_flush");
 	if (ctx->crcctx == NULL)
 	{
@@ -465,7 +468,7 @@ static apr_status_t flush_block(ap_filter_t *f)
 		unsigned char blocknum = (unsigned char) ((-rd_flush_rslt)-1);
 		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
 	}
-	
+
 	// Update the context with the results
 	ctx->crc_read_block_result = rd_flush_rslt;
 	ctx->crc_read_block_ndigested = 0;
@@ -505,7 +508,7 @@ static apr_status_t process_eos(ap_filter_t *f)
 {
 	crccache_ctx *ctx = f->ctx;
 	apr_status_t rslt;
-	
+
 	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,"CRCCACHE-ENCODE EOS reached for APR bucket");
 
 
@@ -518,18 +521,18 @@ static apr_status_t process_eos(ap_filter_t *f)
 			return rslt;
 		}
 	}
-	
+
 	do
 	{
 		// Flush remaining block in the crcctx
 		rslt = flush_block(f);
 		if (rslt != APR_SUCCESS)
 		{
-			return rslt; 
+			return rslt;
 		}
 	}
 	while (ctx->crc_read_block_result != 0);
-	
+
 	// Flush anything that is remaining in the compress buffer
 	rslt = flush_compress_buffer(f);
 	if (rslt != APR_SUCCESS)
@@ -581,7 +584,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		{
 			// Buffer is filled to the end. Flush as much as possible
 			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
+					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 			while (ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->block_size)
 			{
@@ -592,7 +595,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 					return rslt;
 				}
 				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
+						"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 			}
 
@@ -601,7 +604,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 				// Copy the remaining part of the buffer to the start of the buffer,
 				// so that it can be filled again as new data arrive
 				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Moving %zu bytes to begin of buffer", 
+						"CRCCACHE-ENCODE Moving %zu bytes to begin of buffer",
 						ctx->buffer_putpos - ctx->buffer_read_getpos);
 				memcpy(ctx->buffer, ctx->buffer + ctx->buffer_read_getpos, ctx->buffer_putpos - ctx->buffer_read_getpos);
 			}
@@ -614,7 +617,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		{
 			// Previous block matched exactly. Let's hope the next block as well
 			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)", 
+					"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
 			rslt = process_block(f);
 			if (rslt != APR_SUCCESS)
@@ -670,14 +673,14 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		 * If it's already encoded by crccache: don't compress again.
 		 * (We could, but let's not.)
 		 */
-		encoding = apr_table_get(r->headers_out, "Content-Encoding");
+		encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
 		if (encoding && strcasecmp(CRCCACHE_ENCODING,encoding) == 0)
 		{
 			/* Even if we don't accept this request based on it not having
 			 * the Accept-Encoding, we need to note that we were looking
 			 * for this header and downstream proxies should be aware of that.
 			 */
-			apr_table_mergen(r->headers_out, "Vary", "Accept-Encoding");
+			apr_table_mergen(r->headers_out, "Vary", "A-IM");
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
@@ -708,8 +711,8 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		/* Parse the input headers */
 		const char * hashes, *file_size_header;
-		hashes = apr_table_get(r->headers_in, "Block-Hashes");
-		file_size_header = apr_table_get(r->headers_in, "File-Size");
+		hashes = apr_table_get(r->headers_in, BLOCK_HEADER);
+		file_size_header = apr_table_get(r->headers_in, FILE_SIZE_HEADER);
 
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
 				"CRCCACHE-ENCODE encoding file size header %s", file_size_header);
@@ -741,7 +744,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		// much sense to even keep invoking the crc_read_block(...) function as soon as a difference has been found.
 		// Hence, no need to make a (potentially huge) buffer for these type of compressed (potentially huge, think about movies)
 		// data types.
-		ctx->buffer_size = ctx->block_size*4 + 1; 
+		ctx->buffer_size = ctx->block_size*4 + 1;
 		ctx->buffer_digest_getpos = 0;
 		ctx->buffer_read_getpos = 0;
 		ctx->buffer_putpos = 0;
@@ -758,9 +761,9 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		/* Setup deflate for compressing non-matched literal data */
 		ctx->compression_state = COMPRESSION_BUFFER_EMPTY;
-		// TODO: should I pass some apr_palloc based function to prevent memory leaks 
+		// TODO: should I pass some apr_palloc based function to prevent memory leaks
 		//in case of unexpected errors?
-		
+
 		ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE size of compression stream: %zd",sizeof(*(ctx->compression_stream)));
 		ctx->compression_stream = apr_palloc(r->pool, sizeof(*(ctx->compression_stream)));
 		ctx->compression_stream->zalloc = Z_NULL;
@@ -793,10 +796,11 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		// TODO: the crccache-client could recalculate these headers once it has
 		//        reconstructed the page, before handling the reconstructed page
 		//        back to the client
-		apr_table_setn(r->headers_out, "Content-Encoding", CRCCACHE_ENCODING);
+		apr_table_setn(r->headers_out, ENCODING_HEADER, CRCCACHE_ENCODING);
 		apr_table_unset(r->headers_out, "Content-Length");
 		apr_table_unset(r->headers_out, "Content-MD5");
 		crccache_check_etag(r, CRCCACHE_ENCODING);
+
 	}
 
 
@@ -805,7 +809,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		const char *data;
 		apr_size_t len;
 		apr_status_t rslt;
-		
+
 		e = APR_BRIGADE_FIRST(bb);
 
 		if (APR_BUCKET_IS_EOS(e))
@@ -825,7 +829,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			{
 				return rslt; // A problem occurred. Abort the processing
 			}
-			
+
 			/* Okay, we've seen the EOS.
 			 * Time to pass it along down the chain.
 			 */

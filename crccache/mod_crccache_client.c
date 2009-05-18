@@ -824,7 +824,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		ctx->tail_block_size = tail_block_size;
 		ctx->state = DECODING_NEW_SECTION;
 		ctx->cached_bucket = e;
-		
+
 		// Setup inflate for decompressing non-matched literal data
 		ctx->decompression_stream = apr_palloc(r->pool, sizeof(*(ctx->decompression_stream)));
 		ctx->decompression_stream->zalloc = Z_NULL;
@@ -852,7 +852,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
 		// use buffer to set block size first
 		snprintf(hash_set,HASH_HEADER_SIZE,"%zu",len);
-		apr_table_set(r->headers_in, "File-Size", hash_set);
+		apr_table_set(r->headers_in, FILE_SIZE_HEADER, hash_set);
 
 		uint32_t crcs[block_count_including_final_block];
 		crc_of_blocks(data, len, blocksize, 30, crcs);
@@ -864,7 +864,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %08X",i,crcs[i]);
 		}
 		//apr_bucket_delete(e);
-		apr_table_set(r->headers_in, "Block-Hashes", hash_set);
+		apr_table_set(r->headers_in, BLOCK_HEADER, hash_set);
 
 		// TODO: do we want to cache the hashes here?
 		//ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
@@ -1196,9 +1196,12 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	// TODO: set up context type struct
 	crccache_client_ctx *ctx = f->ctx;
 
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+			"CRCSYNC retuned status code (%d)", r->status);
+
 	// TODO: make this work if we have multiple encodings
 	const char * content_encoding;
-	content_encoding = apr_table_get(r->headers_out, "Content-Encoding");
+	content_encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
 	if (content_encoding == NULL || strcmp(CRCCACHE_ENCODING, content_encoding)
 			!= 0) {
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
@@ -1344,7 +1347,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 							return APR_EGENERAL;
 						}
 						int have = sizeof(decompressed_data_buf) - strm->avail_out;
-						ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, 
+						ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
 								"CRCSYNC-DECODE inflate rslt %d, consumed %d, produced %d",
 								z_RC, avail_in_pre_inflate - strm->avail_in, have);
 						if (have)

@@ -11,7 +11,10 @@
 #ifndef CRCCACHE_H_
 #define CRCCACHE_H_
 
-const char * CRCCACHE_ENCODING = "crccache";
+const char * CRCCACHE_ENCODING = "crcsync";
+const char * ENCODING_HEADER = "IM";
+const char * BLOCK_HEADER = "If-Block";
+const char * FILE_SIZE_HEADER = "File-Size";
 // hashes per file, 40x5 gives us 200 bytes, acceptable overhead
 #define FULL_BLOCK_COUNT 40
 const int HASH_SIZE=30; // bits per has, 30 bits is 5 bytes base 64
