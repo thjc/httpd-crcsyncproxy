@@ -189,7 +189,6 @@ static ap_filter_rec_t *crccache_out_filter_handle;
 static int crccache_server_header_parser_handler(request_rec *r) {
 	crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_server_module);
-	int status = OK;
 	if (conf->enabled)
 	{
 		const char * hashes, *file_size_header;
@@ -220,13 +219,28 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			// And the crccache filter itself ofcourse
 			ap_add_output_filter_handle(crccache_out_filter_handle,
 					NULL, r, r->connection);
-			//r->status=226;
-			status = OK;
-		}
-	}
 
-	return status;
+		}
+/*		// All is okay, so set response header to IM Used
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
+		r->status=226;
+		r->status_line="226 IM Used";
+		return 226;*/
+	}
+	return OK;
 }
+
+/*static int crccache_server_header_filter_handler(ap_filter_t *f, apr_bucket_brigade *b) {
+	//request_rec *r)
+	request_rec *r = f->r;
+
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE Setting return status code");
+
+// All is okay, so set response header to IM Used
+	r->status=226;
+	r->status_line="HTTP/1.1 226 IM Used";
+	return 226;
+}*/
 
 /* PR 39727: we're screwing up our clients if we leave a strong ETag
  * header while transforming content.  Henrik Nordstrom suggests
@@ -640,6 +654,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 	request_rec *r = f->r;
 	crccache_ctx *ctx = f->ctx;
 	int zRC;
+	int return_code = APR_SUCCESS;
 
 	/* Do nothing if asked to filter nothing. */
 	if (APR_BRIGADE_EMPTY(bb)) {
@@ -801,6 +816,11 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		apr_table_unset(r->headers_out, "Content-MD5");
 		crccache_check_etag(r, CRCCACHE_ENCODING);
 
+		// All is okay, so set response header to IM Used
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
+		r->status=226;
+		r->status_line="226 IM Used";
+		//return_code = 226;
 	}
 
 
@@ -883,7 +903,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
     }
 
     apr_brigade_cleanup(bb);
-    return APR_SUCCESS;
+    return return_code;
 }
 
 static void disk_cache_register_hook(apr_pool_t *p) {
@@ -892,7 +912,10 @@ static void disk_cache_register_hook(apr_pool_t *p) {
 
 	ap_hook_header_parser(crccache_server_header_parser_handler, NULL, NULL,
 			APR_HOOK_MIDDLE);
-
+/*
+        ap_register_output_filter("CRCCACHE_HEADER", crccache_server_header_filter_handler,
+                                  NULL, AP_FTYPE_PROTOCOL);
+*/
 	crccache_out_filter_handle = ap_register_output_filter("CRCCACHE_OUT",
 			crccache_out_filter, NULL, AP_FTYPE_CONTENT_SET);
 }

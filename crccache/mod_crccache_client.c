@@ -110,6 +110,7 @@ typedef struct crccache_client_ctx_t {
 	decoding_state state;
 	decompression_state_t decompression_state;
 	z_stream *decompression_stream;
+	int headers_checked;
 } crccache_client_ctx;
 
 /*
@@ -1196,22 +1197,37 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	// TODO: set up context type struct
 	crccache_client_ctx *ctx = f->ctx;
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-			"CRCSYNC retuned status code (%d)", r->status);
+	// if this is the first pass in decoding we should check the headers etc
+	// and fix up those headers that we modified as part of the encoding
+	if (ctx->headers_checked == 0)
+	{
+		ctx->headers_checked = 1;
 
-	// TODO: make this work if we have multiple encodings
-	const char * content_encoding;
-	content_encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
-	if (content_encoding == NULL || strcmp(CRCCACHE_ENCODING, content_encoding)
-			!= 0) {
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-		"CRCSYNC not decoding, content encoding bad (%s)", content_encoding?content_encoding:"NULL");
-		ap_remove_output_filter(f);
-		return ap_pass_brigade(f->next, bb);
-	}
-	// TODO: Remove crcsync from the content encoding header
+				"CRCSYNC retuned status code (%d)", r->status);
 
-	// TODO: Fix up the etag as well
+		// TODO: make this work if we have multiple encodings
+		const char * content_encoding;
+		content_encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
+		if (content_encoding == NULL || strcmp(CRCCACHE_ENCODING, content_encoding)
+				!= 0) {
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+			"CRCSYNC not decoding, content encoding bad (%s)", content_encoding?content_encoding:"NULL");
+			ap_remove_output_filter(f);
+			return ap_pass_brigade(f->next, bb);
+		}
+		// TODO: Remove crcsync from the content encoding header
+
+		// TODO: we should only set the status back to 200 if there are no
+		// other instance codings used
+		r->status = 200;
+		r->status_line = "200 OK";
+
+
+		// TODO: Fix up the etag as well
+	}
+
+
 
 	/* Do nothing if asked to filter nothing. */
 	if (APR_BRIGADE_EMPTY(bb)) {
