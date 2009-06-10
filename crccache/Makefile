@@ -1,4 +1,4 @@
-APACHE_PATH=../
+APACHE_PATH=../apache
 MOD_PATH=$(APACHE_PATH)/modules
 CACHE_PATH=$(MOD_PATH)/cache
 
