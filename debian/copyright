@@ -1,0 +1,20 @@
+This package was debianized by Toby Collett <thjc@plan9.net.nz> on
+Wed, 10 Jun 2009 18:31:16 +0200.
+
+Upstream Author(s):
+
+    Toby Collett
+    Alex Wulms
+    Rusty Russel (ccan crc libraries)
+
+Copyright:
+
+    <Copyright (C) 2009 The above>
+    <likewise for another author>
+
+License:
+
+    GPL2+
+
+The Debian packaging is copyright 2009, Toby Collett <thjc@plan9.net.nz> and
+is licensed under the GPL, see `/usr/share/common-licenses/GPL2'.

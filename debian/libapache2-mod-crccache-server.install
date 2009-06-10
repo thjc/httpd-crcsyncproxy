@@ -1,0 +1,3 @@
+.libs/mod_bw.so usr/lib/apache2/modules
+debian/bw.load  etc/apache2/mods-available
+mod_bw.txt      usr/share/doc/libapache2-mod-bw
