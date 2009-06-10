@@ -19,12 +19,12 @@ const char * BLOCK_HEADER = "If-Block";
 const char * FILE_SIZE_HEADER = "File-Size";
 // hashes per file, 40x5 gives us 200 bytes, acceptable overhead
 #define FULL_BLOCK_COUNT 40
-const int HASH_SIZE=30; // bits per has, 30 bits is 5 bytes base 64
-const int HASH_BASE64_SIZE_TX=5; //HASH_SIZE/6;
-const int HASH_BASE64_SIZE_ACTUAL=8; // decoded/coded in blocks of 4 into three bytes
-const int HASH_BASE64_SIZE_PADDING=3; // decoded/coded in blocks of 4 into three bytes
+const int HASH_SIZE=60; // bits per has, 30 bits is 5 bytes base 64
+const int HASH_BASE64_SIZE_TX=10; //HASH_SIZE/6;
+const int HASH_BASE64_SIZE_ACTUAL=12; // decoded/coded in blocks of 4 into three bytes
+const int HASH_BASE64_SIZE_PADDING=2; // decoded/coded in blocks of 4 into three bytes
 
-const int HASH_HEADER_SIZE=205;//(FULL_BLOCK_COUNT+1)*HASH_BASE64_SIZE_TX;
+const int HASH_HEADER_SIZE=405;//(FULL_BLOCK_COUNT+1)*HASH_BASE64_SIZE_TX+padding;
 
 
 //const unsigned char ENCODING_LITERAL='L';

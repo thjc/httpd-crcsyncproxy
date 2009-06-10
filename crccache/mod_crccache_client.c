@@ -862,7 +862,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		{
 			// encode the hash into base64;
 			encode_bithash(crcs[i] >> (64-HASH_SIZE),&hash_set[i*HASH_BASE64_SIZE_TX], HASH_SIZE);
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %016lX %s",i,crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX] );
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %016lX %s",i,crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX] );
 		}
 		//apr_bucket_delete(e);
 		apr_table_set(r->headers_in, BLOCK_HEADER, hash_set);
