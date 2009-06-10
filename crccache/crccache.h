@@ -11,6 +11,8 @@
 #ifndef CRCCACHE_H_
 #define CRCCACHE_H_
 
+#include <stdint.h>
+
 const char * CRCCACHE_ENCODING = "crcsync";
 const char * ENCODING_HEADER = "IM";
 const char * BLOCK_HEADER = "If-Block";
@@ -33,8 +35,8 @@ const int ENCODING_COMPRESSED_HEADER_SIZE = 1;// 1 byte indicator
 //const int ENCODING_LITERAL_HEADER_SIZE = 1+4;// 1 byte indicator + 4 bytes length
 const int ENCODING_BLOCK_HEADER_SIZE = 1+1;// 1 byte indicator + 1 byte block
 
-unsigned decode_30bithash(const char * source);
-char * encode_30bithash(unsigned hash, char * target);
+uint64_t decode_bithash(const char * source, unsigned number_bits);
+char * encode_bithash(uint64_t hash, char * target, unsigned number_bits);
 
 
 

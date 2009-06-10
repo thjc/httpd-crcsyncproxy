@@ -6,49 +6,95 @@
  */
 
 #include <string.h>
+#include <assert.h>
 #include <apr_base64.h>
+#include <stdio.h>
 
-/* fills in the first 5 bytes of target with the base64 bit encoded hash
-
-it is endian safe, and adds a null terminator, so target must have space for 6 bytes
-*/
-char * encode_30bithash(unsigned hash, char * target)
+int is_big_endian()
 {
-	char temp_result[9];
-	unsigned char source[4];
-	// possibly a faster way, but needs to be endian safe, including bit endianness
-	source[0]=(hash&0x3fc00000)>>22;
-	source[1]=(hash&0x003fc000)>>14;
-	source[2]=(hash&0x00003fc0)>>6;
-	source[3]=(hash&0x0000003f)<<2;
+	int i = 1;
+	if (((unsigned char *) &i)[0]==1)
+		return 0;
+	return 1;
+}
 
-	apr_base64_encode (temp_result, (void *)source, 4);
-	memcpy(target,temp_result,5);
-	target[5]='\0';
+// we need our data in big endian order so we discard the correct bytes 
+// probably a better way of doing this, use htnol or something? 
+void SWAP_BYTES_64(uint64_t * input) 
+{
+		unsigned char * value = (unsigned char *) input;
+		unsigned char temp[4];
+		memcpy(temp,value,4);
+		value[0] = value[7];
+		value[1] = value[6];
+		value[2] = value[5];
+		value[3] = value[4];
+		value[4] = temp[3];
+		value[5] = temp[2];
+		value[6] = temp[1];
+		value[7] = temp[0];
+}
+/* 
+base 64 encodes an arbitrary number of bits without padding
+
+This will produce ceil(number_bits/6) + 1 bytes of data including the null terminator,
+so target must have this much space available.
+
+*/
+char * encode_bithash(uint64_t hash, char * target, unsigned number_bits)
+{
+	if (number_bits != 64)
+		hash &= ((uint64_t)1 << number_bits)-1;
+
+	// first align the hash in the most significant bits
+	hash = hash << (64-number_bits);
+	
+	// one byte per 6 bits or part there of (excluding null)
+	int result_size = number_bits / 6 + (number_bits % 6 ? 1 : 0);
+
+	// worst case is a 64bit hash to encode
+	if (!is_big_endian())
+	{
+		SWAP_BYTES_64(&hash);
+	}
+	unsigned char * source = (unsigned char *) &hash;
+
+	char temp_result[13];
+	apr_base64_encode (temp_result, (void *)source, 8);
+	memcpy(target,temp_result,result_size);
+	target[result_size]='\0';
 	return target;
 }
 
+/* 
+base 64 decodes an arbitrary number of bits without padding
 
-/* decodes a 5 bytes base 64bit string to the lower 30 bits of an int
-
-it is endian safe, and assumes an input string of 5 bytes
 */
-unsigned decode_30bithash(const char * source)
+uint64_t decode_bithash(char * source, unsigned number_bits)
 {
-	char temp_source[9];
-	unsigned char target[7];
-	memcpy(temp_source,source,5);
-	temp_source[5]='0';
-	temp_source[6]='0';
-	temp_source[7]='0';
-	temp_source[8]='\0';
+	// one byte per 6 bits or part there of (excluding null)
+	int source_size = number_bits / 6 + (number_bits % 6 ? 1 : 0);
+	// nearest multiple of 3 that will contain our source.
+	int true_base64_size = (source_size/3 + (source_size % 3 ? 1 : 0))*3;
+	
+	char temp_source[13];
+	unsigned char target[9];
+	memset(&temp_source,'A',sizeof(temp_source));
+	memset(&target,0,sizeof(target));
+	memcpy(temp_source,source,source_size);
+	temp_source[true_base64_size]='\0';
+	apr_base64_decode_binary ((void*)target, temp_source);
+	uint64_t result = *(uint64_t *) target;
+	if (!is_big_endian())
+	{
+		SWAP_BYTES_64(&result);
+	}
 
-	apr_base64_decode ((void*)target, temp_source);
-	unsigned result;
-	result  = target[0] << 22;
-	result |= target[1] << 14;
-	result |= target[2] << 6;
-	result |= target[3] >> 2;
-
+	// move the hash back to the least significant bits
+	result = result >> (64-number_bits);
+	if (number_bits != 64)
+		result &= ((uint64_t)1 << number_bits)-1;
 	return result;
 }
+
+

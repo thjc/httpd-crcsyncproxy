@@ -770,7 +770,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		int ii;
 		for (ii = 0; ii < block_count_including_final_block; ++ii)
 		{
-			ctx->hashes[ii] = decode_30bithash(&hashes[ii*HASH_BASE64_SIZE_TX]);
+			ctx->hashes[ii] = decode_bithash(&hashes[ii*HASH_BASE64_SIZE_TX],HASH_SIZE) << (64-HASH_SIZE);
 			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE decoded hash[%d] %08X",ii,ctx->hashes[ii]);
 		}
 
