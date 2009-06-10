@@ -83,7 +83,7 @@ typedef struct crccache_ctx_t {
 	apr_bucket_brigade *bb;
 	size_t block_size;
 	size_t tail_block_size;
-	unsigned hashes[FULL_BLOCK_COUNT+1];
+	uint64_t hashes[FULL_BLOCK_COUNT+1];
 	struct crc_context *crcctx;
 	size_t orig_length;
 	size_t tx_length;

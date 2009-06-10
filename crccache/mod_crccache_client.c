@@ -855,8 +855,8 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		snprintf(hash_set,HASH_HEADER_SIZE,"%zu",len);
 		apr_table_set(r->headers_in, FILE_SIZE_HEADER, hash_set);
 
-		uint32_t crcs[block_count_including_final_block];
-		crc_of_blocks(data, len, blocksize, 30, crcs);
+		uint64_t crcs[block_count_including_final_block];
+		crc_of_blocks(data, len, blocksize, HASH_SIZE, crcs);
 
 		for (i = 0; i < block_count_including_final_block;++i)
 		{
