@@ -1,3 +1,3 @@
-.libs/mod_bw.so usr/lib/apache2/modules
-debian/bw.load  etc/apache2/mods-available
-mod_bw.txt      usr/share/doc/libapache2-mod-bw
+crccache/mod_crccache_server.so usr/lib/apache2/modules
+debian/mod_crccache_server.conf  etc/apache2/mods-available
+debian/mod_crccache_server.load  etc/apache2/mods-available
