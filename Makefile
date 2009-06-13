@@ -4,6 +4,8 @@ PACKAGE_NAME=libapache2-mod-crccache
 
 PREFIX?=$(DESTDIR)/
 
+CCAN_PATH=ccan
+
 all:
 	make -C crccache
 
@@ -13,7 +15,7 @@ clean:
 	rm -rf $(PKG_BUILDDIR)
 
 dist:
-	git archive --format=tar --prefix=$(PACKAGE_NAME)-$(VERSION)/ HEAD Makefile crccache ccan | gzip > $(PACKAGE_NAME)_$(VERSION).orig.tar.gz
+	git archive --format=tar --prefix=$(PACKAGE_NAME)-$(VERSION)/ HEAD Makefile crccache ccan apache/modules/cache  | gzip > $(PACKAGE_NAME)_$(VERSION).orig.tar.gz
 
 deb: dist
 	# first unpack the source and copy in the deb dir
@@ -25,6 +27,9 @@ deb: dist
 	
 	# then we need to build the deb source archive
 	cd $(PKG_BUILDDIR)/$(PACKAGE_NAME)-$(VERSION); debuild -S -uc -us	
+
+debbin: deb
+	cd $(PKG_BUILDDIR)/$(PACKAGE_NAME)-$(VERSION); debuild -uc -us
 
 install:
 	echo INSTALL $(PREFIX)
