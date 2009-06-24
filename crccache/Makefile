@@ -15,3 +15,15 @@ all: mod_crccache_client.so mod_crccache_server.so
 
 clean:
 	rm -rf *.so *.o
+
+test: test.o
+	gcc $^ -o $@ -lz   
+	
+run-test:	test
+	./test
+
+run-t_sh:
+	./t.sh
+	
+restart:
+	sudo /etc/init.d/apache2 restart
