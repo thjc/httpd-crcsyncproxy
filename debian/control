@@ -1,0 +1,32 @@
+Source: libapache2-mod-crccache
+Priority: extra
+Maintainer: Toby Collett <thjc@plan9.net.nz>
+Build-Depends: debhelper (>= 7), apache2-prefork-dev (>= 2.2.3) | apache2-threaded-dev (>= 2.2.3)
+Standards-Version: 3.8.0
+Section: libs
+Homepage: http://wiki.laptop.org/go/Apache_Proxy_CRCsync
+
+Package: libapache2-mod-crccache-server
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, apache2.2-common
+Description: crccache client and server proxy modules for apache2 - Server
+ This module implements the crcsync standard for delta coded messages
+ based on a dual proxy configuration.
+ .
+ Hopefully the protocol will become an official standard at some point
+ .
+ This package contains the server proxy module, this should be installed
+ on the fast end of the link
+
+Package: libapache2-mod-crccache-client
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, apache2.2-common
+Description: crccache client and server proxy modules for apache2 - Server
+ This module implements the crcsync standard for delta coded messages
+ based on a dual proxy configuration.
+ .
+ Hopefully the protocol will become an official standard at some point
+ .
+ This package contains the client proxy module, this should be installed
+ on the slow end of the link
+

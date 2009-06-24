@@ -1,0 +1,5 @@
+libapache2-mod-crccache (0.1.0-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Toby Collett <thjc@plan9.net.nz>  Wed, 10 Jun 2009 18:31:16 +0200
