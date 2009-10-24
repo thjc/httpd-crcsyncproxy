@@ -785,6 +785,17 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		ctx->tail_block_size = file_size % FULL_BLOCK_COUNT;
 		size_t block_count_including_final_block = FULL_BLOCK_COUNT + (ctx->tail_block_size != 0);
 
+		// Decode the hashes
+		apr_base64_decode((char *)ctx->hashes, hashes);
+		free(hashes);
+		hashes = NULL;
+		// swap to network byte order
+		int i;
+		for (i = 0; i < block_count_including_final_block;++i)
+		{
+			htobe64(ctx->hashes[i]);
+		}
+
 		// Data come in at chunks that are potentially smaller then block_size
 		// Accumulate those chunks into a buffer.
 		// The buffer must be at least 2*block_size so that crc_read_block(...) can find a matching block, regardless
@@ -807,16 +818,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		ctx->crc_read_block_result = 0;
 		ctx->buffer = apr_palloc(r->pool, ctx->buffer_size);
 
-		// Decode the hashes
-		apr_base64_decode((char *)ctx->hashes, hashes);
-		free(hashes);
-		hashes = NULL;
-		// swap to network byte order
-		int i;
-		for (i = 0; i < block_count_including_final_block;++i)
-		{
-			htobe64(ctx->hashes[i]);
-		}
+
 
 		/* Setup deflate for compressing non-matched literal data */
 		ctx->compression_state = COMPRESSION_BUFFER_EMPTY;
@@ -856,16 +858,15 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		//        reconstructed the page, before handling the reconstructed page
 		//        back to the client
 		apr_table_setn(r->headers_out, ENCODING_HEADER, CRCCACHE_ENCODING);
-		apr_table_setn(r->headers_out, VARY_HEADER, VARY_VALUE);
+		apr_table_addn(r->headers_out, VARY_HEADER, VARY_VALUE);
 		apr_table_unset(r->headers_out, "Content-Length");
 		apr_table_unset(r->headers_out, "Content-MD5");
 		crccache_check_etag(r, CRCCACHE_ENCODING);
 
 		// All is okay, so set response header to IM Used
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
-		r->status=226;
-		r->status_line="226 IM Used";
-		//return_code = 226;
+		//r->status=226;
+		//r->status_line="226 IM Used";
 	}
 
 

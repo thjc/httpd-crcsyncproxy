@@ -17,7 +17,7 @@ const char * CRCCACHE_ENCODING = "crcsync";
 const char * ENCODING_HEADER = "Content-Encoding";
 const char * BLOCK_HEADER = "If-Block";
 const char * VARY_HEADER = "Vary";
-const char * VARY_VALUE = BLOCK_HEADER;
+const char * VARY_VALUE = "If-Block";
 // hashes per file
 #define FULL_BLOCK_COUNT 40
 const int HASH_SIZE=64; // bits per has, 30 bits is 5 bytes base 64

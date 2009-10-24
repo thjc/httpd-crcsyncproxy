@@ -93,6 +93,7 @@ static ap_filter_rec_t *crccache_decode_filter_handle;
 typedef enum decoding_state {
 	DECODING_NEW_SECTION,
 	DECODING_COMPRESSED,
+	DECODING_LITERAL,
 	DECODING_BLOCK_HEADER,
 	DECODING_BLOCK
 } decoding_state;
@@ -1225,8 +1226,8 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		// TODO: we should only set the status back to 200 if there are no
 		// other instance codings used
-		r->status = 200;
-		r->status_line = "200 OK";
+		//r->status = 200;
+		//r->status_line = "200 OK";
 
 
 		// TODO: Fix up the etag as well
@@ -1312,9 +1313,11 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				{
 					// check if we have a compressed section or a block section
 					if (data[consumed_bytes] == ENCODING_COMPRESSED)
-					ctx->state = DECODING_COMPRESSED;
+						ctx->state = DECODING_COMPRESSED;
 					else if (data[consumed_bytes] == ENCODING_BLOCK)
-					ctx->state = DECODING_BLOCK_HEADER;
+						ctx->state = DECODING_BLOCK_HEADER;
+					else if (data[consumed_bytes] == ENCODING_LITERAL)
+						ctx->state = DECODING_LITERAL;
 					else
 					{
 						ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
