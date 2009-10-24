@@ -17,7 +17,7 @@
 /* crcsync/crccache apache client module
  *
  * This module is designed to run as a cache server on the local end of a slow
- * internet link. This module uses a crc32 running hash algorithm to reduce
+ * internet link. This module uses a crc running hash algorithm to reduce
  * data transfer in cached but modified upstream files.
  *
  * CRC algorithm uses the crcsync library created by Rusty Russel
@@ -33,6 +33,7 @@
 
 #include "apr_file_io.h"
 #include "apr_strings.h"
+#include <apr_base64.h>
 #include "mod_cache.h"
 #include "mod_disk_cache.h"
 #include "ap_provider.h"
@@ -786,7 +787,6 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 
 	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
 
-
 	/* This case should not happen... */
 	if (!dobj->hfd) {
 		/* XXX log message */
@@ -810,6 +810,8 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 
 	// this will be rounded down, but thats okay
+	// TODO: I think that we should just add %  to the trailing block, otherwise our extra block
+	// is always limited to max of BLOCK_COUNT size.
 	size_t blocksize = len/FULL_BLOCK_COUNT;
 	size_t tail_block_size = len % FULL_BLOCK_COUNT;
 	size_t block_count_including_final_block = FULL_BLOCK_COUNT + (tail_block_size != 0);
@@ -850,25 +852,27 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// and set-up the decoding filter
 
 		// add one for base 64 overflow and null terminator
-		char hash_set[HASH_HEADER_SIZE+HASH_BASE64_SIZE_PADDING+1];
-		// use buffer to set block size first
-		snprintf(hash_set,HASH_HEADER_SIZE,"%zu",len);
-		apr_table_set(r->headers_in, FILE_SIZE_HEADER, hash_set);
+		char hash_set[HASH_HEADER_SIZE+1];
 
 		uint64_t crcs[block_count_including_final_block];
 		crc_of_blocks(data, len, blocksize, HASH_SIZE, crcs);
 
+		// swap to network byte order
 		for (i = 0; i < block_count_including_final_block;++i)
 		{
-			// encode the hash into base64;
-			encode_bithash(crcs[i] >> (64-HASH_SIZE),&hash_set[i*HASH_BASE64_SIZE_TX], HASH_SIZE);
-			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: block %d, hash %016lX %s",i,crcs[i],&hash_set[i*HASH_BASE64_SIZE_TX] );
+			htobe64(crcs[i]);
 		}
-		//apr_bucket_delete(e);
-		apr_table_set(r->headers_in, BLOCK_HEADER, hash_set);
 
+		apr_base64_encode (hash_set, (char *)crcs, block_count_including_final_block*sizeof(crcs[0]));
+		hash_set[HASH_HEADER_SIZE] = '\0';
+		//apr_bucket_delete(e);
+
+		// TODO; bit of a safety margin here, could calculate exact size
+		const int block_header_max_size = HASH_HEADER_SIZE+32;
+		char block_header_txt[block_header_max_size];
+		snprintf(block_header_txt, block_header_max_size,"fs=%zu, h=%s",len,hash_set);
+		apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
 		// TODO: do we want to cache the hashes here?
-		//ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "adding block-hashes header: %s",hash_set);
 
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
@@ -880,7 +884,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		apr_file_close(dobj->hfd);
 	}
 	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
-	"disk_cache: Recalled headers for URL %s", dobj->name);
+	"crccache_client: Recalled headers for URL %s", dobj->name);
 	return APR_SUCCESS;
 }
 
@@ -896,6 +900,7 @@ static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 	e = apr_bucket_eos_create(bb->bucket_alloc);
 	APR_BRIGADE_INSERT_TAIL(bb, e);
 
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, NULL,	"crccache_client: Recalled body for URL %s", dobj->name);
 	return APR_SUCCESS;
 }
 

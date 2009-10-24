@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include "apr_file_io.h"
 #include "apr_strings.h"
+#include <apr_base64.h>
 #include "mod_cache.h"
 #include "mod_disk_cache.h"
 #include "ap_provider.h"
@@ -186,24 +187,67 @@ static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRootServer", 
 
 static ap_filter_rec_t *crccache_out_filter_handle;
 
+int decode_if_block_header(const char * header, int * version, size_t * file_size, char ** hashes)
+{
+	*version = 1;
+	*file_size = 0;
+	*hashes = NULL; // this will be allocated below, make sure we free it
+	int start = 0;
+	int ii;
+	for (ii = 0; ii < strlen(header);++ii)
+	{
+		if (header[ii] == ',' || ii == strlen(header)-1)
+		{
+			sscanf(&header[start]," v=%d",version);
+			sscanf(&header[start]," h=%as",hashes);
+			sscanf(&header[start]," fs=%zu",file_size);
+			start = ii + 1;
+		}
+	}
+
+	if (*hashes == NULL)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE no hashes reported in header");
+		return -1;
+	}
+	if (*version != 1)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE Unsupported header version, %d",*version);
+		free(*hashes);
+		*hashes = NULL;
+		return -1;
+	}
+	if (*file_size == 0)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE no file size reported in header");
+		free(*hashes);
+		*hashes = NULL;
+		return -1;
+	}
+	return 0;
+}
+
 static int crccache_server_header_parser_handler(request_rec *r) {
 	crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_server_module);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE handler");
 	if (conf->enabled)
 	{
-		const char * hashes, *file_size_header;
-		hashes = apr_table_get(r->headers_in, BLOCK_HEADER);
-		file_size_header = apr_table_get(r->headers_in, FILE_SIZE_HEADER);
-		if (hashes && file_size_header)
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Checking for headers");
+		const char * header;
+		header = apr_table_get(r->headers_in, BLOCK_HEADER);
+		if (header)
 		{
+			int version;
 			size_t file_size;
-			int ret = sscanf(file_size_header,"%zu",&file_size);
-			if (ret < 0)
+			char * hashes;
+			if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
 			{
-				ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "CRCCACHE-ENCODE Failed to convert file size header to size_t, %s",file_size_header);
+				// failed to decode if block header so just process request normally
 				return OK;
 			}
-
+			free (hashes);
+			hashes = NULL;
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
 			// Insert mod_deflate's INFLATE filter in the chain to unzip content
 			// so that there is clear text available for the delta algorithm
@@ -725,21 +769,18 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		}
 
 		/* Parse the input headers */
-		const char * hashes, *file_size_header;
-		hashes = apr_table_get(r->headers_in, BLOCK_HEADER);
-		file_size_header = apr_table_get(r->headers_in, FILE_SIZE_HEADER);
-
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE encoding file size header %s", file_size_header);
-
-		errno=0;
-		size_t file_size = strtoull(file_size_header,NULL,0);
-		if (errno || file_size <= 0)
+		const char * header;
+		header = apr_table_get(r->headers_in, BLOCK_HEADER);
+		int version;
+		size_t file_size;
+		char * hashes;
+		if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
 		{
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,"crccache: failed to convert file size header to size_t, %s",file_size_header);
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,"crccache: failed to decode if-block header");
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
+
 		ctx->block_size = file_size/FULL_BLOCK_COUNT;
 		ctx->tail_block_size = file_size % FULL_BLOCK_COUNT;
 		size_t block_count_including_final_block = FULL_BLOCK_COUNT + (ctx->tail_block_size != 0);
@@ -767,11 +808,14 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		ctx->buffer = apr_palloc(r->pool, ctx->buffer_size);
 
 		// Decode the hashes
-		int ii;
-		for (ii = 0; ii < block_count_including_final_block; ++ii)
+		apr_base64_decode((char *)ctx->hashes, hashes);
+		free(hashes);
+		hashes = NULL;
+		// swap to network byte order
+		int i;
+		for (i = 0; i < block_count_including_final_block;++i)
 		{
-			ctx->hashes[ii] = decode_bithash(&hashes[ii*HASH_BASE64_SIZE_TX],HASH_SIZE) << (64-HASH_SIZE);
-			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE decoded hash[%d] %08X",ii,ctx->hashes[ii]);
+			htobe64(ctx->hashes[i]);
 		}
 
 		/* Setup deflate for compressing non-matched literal data */
@@ -812,6 +856,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		//        reconstructed the page, before handling the reconstructed page
 		//        back to the client
 		apr_table_setn(r->headers_out, ENCODING_HEADER, CRCCACHE_ENCODING);
+		apr_table_setn(r->headers_out, VARY_HEADER, VARY_VALUE);
 		apr_table_unset(r->headers_out, "Content-Length");
 		apr_table_unset(r->headers_out, "Content-MD5");
 		crccache_check_etag(r, CRCCACHE_ENCODING);
