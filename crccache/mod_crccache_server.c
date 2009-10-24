@@ -864,7 +864,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		crccache_check_etag(r, CRCCACHE_ENCODING);
 
 		// All is okay, so set response header to IM Used
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
+		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
 		//r->status=226;
 		//r->status_line="226 IM Used";
 	}
