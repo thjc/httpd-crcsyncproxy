@@ -8,7 +8,7 @@ SOURCE_ROOT=..
 EXTRA_FLAGS=-D_LARGEFILE64_SOURCE -Wall -Werror -g -fPIC -I/usr/include/apache2 -I$(SOURCE_ROOT) -I$(CACHE_PATH) -I$(CCAN_PATH) -I$(APACHE_PATH) -O3
 CFLAGS=`apr-config --cflags --includes` $(EXTRA_FLAGS)
 CXXFLAGS=`apr-config --cppflags --includes` $(EXTRA_FLAGS)
-LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz
+LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz -lcrypto
 
 all: mod_crccache_client.so mod_crccache_server.so benchmark
 

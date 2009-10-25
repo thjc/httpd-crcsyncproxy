@@ -44,7 +44,8 @@
 #include "crccache.h"
 #include "ap_wrapper.h"
 #include <crcsync/crcsync.h>
-#include "zlib.h"
+#include <zlib.h>
+#include <openssl/evp.h>
 
 /*
  * mod_disk_cache: Disk Based HTTP 1.1 Cache.
@@ -94,6 +95,7 @@ typedef enum decoding_state {
 	DECODING_NEW_SECTION,
 	DECODING_COMPRESSED,
 	DECODING_LITERAL,
+	DECODING_HASH,
 	DECODING_BLOCK_HEADER,
 	DECODING_BLOCK
 } decoding_state;
@@ -113,6 +115,10 @@ typedef struct crccache_client_ctx_t {
 	decompression_state_t decompression_state;
 	z_stream *decompression_stream;
 	int headers_checked;
+	EVP_MD_CTX mdctx;
+	unsigned char md_value_calc[EVP_MAX_MD_SIZE];
+	unsigned char md_value_rx[EVP_MAX_MD_SIZE];
+	unsigned md_value_rx_count;
 } crccache_client_ctx;
 
 /*
@@ -875,6 +881,11 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
 		// TODO: do we want to cache the hashes here?
 
+		// initialise the context for our sha1 digest of the unencoded response
+		EVP_MD_CTX_init(&ctx->mdctx);
+		const EVP_MD *md = EVP_sha1();
+		EVP_DigestInit_ex(&ctx->mdctx, md, NULL);
+
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
 		// we need that to fill in the matched blocks.
@@ -1267,6 +1278,20 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			ap_remove_output_filter(f);
 
 			// TODO: check strong hash here
+			unsigned md_len;
+			unsigned char md_value[EVP_MAX_MD_SIZE];
+			EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
+			EVP_MD_CTX_cleanup(&ctx->mdctx);
+
+			if (memcmp(md_value, ctx->md_value_rx, 20) != 0)
+			{
+				// TODO: Actually signal this to the user
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED");
+			}
+			else
+			{
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK PASSED");
+			}
 
 			/* Okay, we've seen the EOS.
 			 * Time to pass it along down the chain.
@@ -1318,6 +1343,11 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 						ctx->state = DECODING_BLOCK_HEADER;
 					else if (data[consumed_bytes] == ENCODING_LITERAL)
 						ctx->state = DECODING_LITERAL;
+					else if (data[consumed_bytes] == ENCODING_HASH)
+					{
+						ctx->state = DECODING_HASH;
+						ctx->md_value_rx_count = 0;
+					}
 					else
 					{
 						ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server,
@@ -1346,8 +1376,24 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					apr_bucket_read(ctx->cached_bucket, &source_data, &source_len, APR_BLOCK_READ);
 					assert(block_number < (FULL_BLOCK_COUNT + (ctx->tail_block_size != 0)));
 					memcpy(buf,&source_data[block_number*ctx->block_size],current_block_size);
+					// update our sha1 hash
+					EVP_DigestUpdate(&ctx->mdctx, buf, current_block_size);
 					apr_bucket * b = apr_bucket_pool_create(buf, current_block_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+					break;
+				}
+				case DECODING_HASH:
+				{
+					unsigned avail_in = len - consumed_bytes;
+					// 20 bytes for an SHA1 hash
+					unsigned needed = MIN(20-ctx->md_value_rx_count, avail_in);
+					memcpy(&ctx->md_value_rx[ctx->md_value_rx_count], &data[consumed_bytes],needed);
+					ctx->md_value_rx_count+=needed;
+					consumed_bytes += needed;
+					if (ctx->md_value_rx_count == 20)
+					{
+						ctx->state = DECODING_NEW_SECTION;
+					}
 					break;
 				}
 				case DECODING_COMPRESSED:
@@ -1379,6 +1425,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 							// write output data
 							char * buf = apr_palloc(r->pool, have);
 							memcpy(buf,decompressed_data_buf,have);
+							EVP_DigestUpdate(&ctx->mdctx, buf, have);
 							apr_bucket * b = apr_bucket_pool_create(buf, have, r->pool, f->c->bucket_alloc);
 							APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 						}

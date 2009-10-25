@@ -42,7 +42,8 @@
 #include "mod_crccache_server.h"
 
 #include <crcsync/crcsync.h>
-#include "zlib.h"
+#include <zlib.h>
+#include <openssl/evp.h>
 
 module AP_MODULE_DECLARE_DATA crccache_server_module;
 
@@ -91,6 +92,7 @@ typedef struct crccache_ctx_t {
 	size_t tx_uncompressed_length;
 	compression_state_t compression_state;
 	z_stream *compression_stream;
+	EVP_MD_CTX mdctx;
 	int debug_skip_writing; // ____
 } crccache_ctx;
 
@@ -408,6 +410,38 @@ static apr_status_t write_literal(ap_filter_t *f, unsigned char *buffer, long co
 }
 
 /**
+ * Write literal data
+ */
+static apr_status_t write_hash(ap_filter_t *f, unsigned char *buffer, long count)
+{
+	request_rec *r = f->r;
+	crccache_ctx *ctx = f->ctx;
+	apr_status_t rslt;
+
+	rslt = flush_compress_buffer(f);
+	if (rslt != APR_SUCCESS)
+	{
+		return rslt;
+	}
+
+	if (ctx->debug_skip_writing)
+		return APR_SUCCESS;
+
+	unsigned bucket_size = count + 1;
+	ctx->tx_length += bucket_size;
+	ctx->tx_uncompressed_length += bucket_size;
+	char * buf = apr_palloc(r->pool, bucket_size);
+
+	buf[0] = ENCODING_HASH;
+	memcpy(&buf[1],buffer,count);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE HASH");
+	apr_bucket * b = apr_bucket_pool_create(buf, bucket_size, r->pool, f->c->bucket_alloc);
+	APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+	return APR_SUCCESS;
+}
+
+
+/**
  * Write a block reference
  */
 static apr_status_t write_block_reference(ap_filter_t *f, long result)
@@ -598,7 +632,11 @@ static apr_status_t process_eos(ap_filter_t *f)
 		return rslt;
 	}
 
-	// TODO: add strong hash here
+	unsigned md_len;
+	unsigned char md_value[EVP_MAX_MD_SIZE];
+	EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
+	EVP_MD_CTX_cleanup(&ctx->mdctx);
+	write_hash(f, md_value, md_len);
 
 	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
 		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length);
@@ -623,6 +661,8 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 	/* read */
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 	ctx->orig_length += len;
+	// update our sha1 hash
+	EVP_DigestUpdate(&ctx->mdctx, data, len);
 	// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE normal data in APR bucket, read %ld", len);
 
 	// append data to the buffer and encode buffer content using the crc_read_block magic
@@ -844,6 +884,11 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
+
+		// initialise the context for our sha1 digest of the unencoded response
+		EVP_MD_CTX_init(&ctx->mdctx);
+		const EVP_MD *md = EVP_sha1();
+		EVP_DigestInit_ex(&ctx->mdctx, md, NULL);
 
 		// now initialise the crcsync context that will do the real work
 		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, block_count_including_final_block, ctx->tail_block_size);

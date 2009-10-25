@@ -30,6 +30,7 @@ const int HASH_HEADER_SIZE=438;
 const unsigned char ENCODING_LITERAL='L';
 const unsigned char ENCODING_BLOCK='B';
 const unsigned char ENCODING_COMPRESSED='Z';
+const unsigned char ENCODING_HASH='S';
 
 const int ENCODING_COMPRESSED_HEADER_SIZE = 1;// 1 byte indicator
 const int ENCODING_LITERAL_HEADER_SIZE = 1+4;// 1 byte indicator + 4 bytes length
