@@ -27,18 +27,21 @@
  */
 
 #include <stdbool.h>
-#include "apr_file_io.h"
-#include "apr_strings.h"
+
+#include <apr_file_io.h>
+#include <apr_strings.h>
 #include <apr_base64.h>
-#include "mod_cache.h"
-#include "mod_disk_cache.h"
+
 #include "ap_provider.h"
+
 #include "util_filter.h"
 #include "util_script.h"
 #include "util_charset.h"
 
-#include "crccache.h"
+#include <http_log.h>
 #include "ap_wrapper.h"
+
+#include "crccache.h"
 #include "mod_crccache_server.h"
 
 #include <crcsync/crcsync.h>
@@ -59,18 +62,6 @@ typedef enum  {
 
 static void *create_config(apr_pool_t *p, server_rec *s) {
 	crccache_server_conf *conf = apr_pcalloc(p, sizeof(crccache_server_conf));
-	conf->disk_cache_conf = apr_pcalloc(p, sizeof(disk_cache_conf));
-
-	/* XXX: Set default values */
-	conf->enabled = 0;
-	conf->disk_cache_conf->dirlevels = DEFAULT_DIRLEVELS;
-	conf->disk_cache_conf->dirlength = DEFAULT_DIRLENGTH;
-	conf->disk_cache_conf->maxfs = DEFAULT_MAX_FILE_SIZE;
-	conf->disk_cache_conf->minfs = DEFAULT_MIN_FILE_SIZE;
-
-	conf->disk_cache_conf->cache_root = NULL;
-	conf->disk_cache_conf->cache_root_len = 0;
-
 	return conf;
 }
 
@@ -98,20 +89,6 @@ typedef struct crccache_ctx_t {
 
 
 /*
- * mod_disk_cache configuration directives handlers.
- */
-static const char *set_cache_root(cmd_parms *parms, void *in_struct_ptr,
-		const char *arg) {
-	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
-				&crccache_server_module);
-	conf->disk_cache_conf->cache_root = arg;
-	conf->disk_cache_conf->cache_root_len = strlen(arg);
-	/* TODO: canonicalize cache_root and strip off any trailing slashes */
-
-	return NULL;
-}
-
-/*
  * Only enable CRCCache Server when requested through the config file
  * so that the user can switch CRCCache server on in a specific virtual server
  */
@@ -123,69 +100,11 @@ static const char *set_crccache_server(cmd_parms *parms, void *dummy, int flag)
 	return NULL;
 }
 
-
-/*
- * Consider eliminating the next two directives in favor of
- * Ian's prime number hash...
- * key = hash_fn( r->uri)
- * filename = "/key % prime1 /key %prime2/key %prime3"
- */
-static const char *set_cache_dirlevels(cmd_parms *parms, void *in_struct_ptr,
-		const char *arg) {
-	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
-			&crccache_server_module);
-	int val = atoi(arg);
-	if (val < 1)
-		return "CacheDirLevelsServer value must be an integer greater than 0";
-	if (val * conf->disk_cache_conf->dirlength > CACHEFILE_LEN)
-		return "CacheDirLevelsServer*CacheDirLengthServer value must not be higher than 20";
-	conf->disk_cache_conf->dirlevels = val;
-	return NULL;
-}
-static const char *set_cache_dirlength(cmd_parms *parms, void *in_struct_ptr,
-		const char *arg) {
-	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
-			&crccache_server_module);
-	int val = atoi(arg);
-	if (val < 1)
-		return "CacheDirLengthServer value must be an integer greater than 0";
-	if (val * conf->disk_cache_conf->dirlevels > CACHEFILE_LEN)
-		return "CacheDirLevelsServer*CacheDirLengthServer value must not be higher than 20";
-
-	conf->disk_cache_conf->dirlength = val;
-	return NULL;
-}
-
-static const char *set_cache_minfs(cmd_parms *parms, void *in_struct_ptr,
-		const char *arg) {
-	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
-			&crccache_server_module);
-
-	if (apr_strtoff(&conf->disk_cache_conf->minfs, arg, NULL, 0) != APR_SUCCESS || conf->disk_cache_conf->minfs
-			< 0) {
-		return "CacheMinFileSizeServer argument must be a non-negative integer representing the min size of a file to cache in bytes.";
-	}
-	return NULL;
-}
-
-static const char *set_cache_maxfs(cmd_parms *parms, void *in_struct_ptr,
-		const char *arg) {
-	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
-			&crccache_server_module);
-	if (apr_strtoff(&conf->disk_cache_conf->maxfs, arg, NULL, 0) != APR_SUCCESS || conf->disk_cache_conf->maxfs
-			< 0) {
-		return "CacheMaxFileSizeServer argument must be a non-negative integer representing the max size of a file to cache in bytes.";
-	}
-	return NULL;
-}
-
-static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRootServer", set_cache_root, NULL, RSRC_CONF,
-		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevelsServer", set_cache_dirlevels, NULL, RSRC_CONF,
-		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLengthServer", set_cache_dirlength, NULL, RSRC_CONF,
-		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSizeServer", set_cache_minfs, NULL, RSRC_CONF,
-		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSizeServer", set_cache_maxfs, NULL, RSRC_CONF,
-		"The maximum file size to cache a document"), AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF,
-		"Enable the CRCCache server in this virtual server"),{ NULL } };
+static const command_rec disk_cache_cmds[] =
+{
+	AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF, "Enable the CRCCache server in this virtual server"),
+	{ NULL }
+};
 
 static ap_filter_rec_t *crccache_out_filter_handle;
 

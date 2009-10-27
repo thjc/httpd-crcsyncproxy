@@ -31,21 +31,35 @@
 
 #include <assert.h>
 
-#include "apr_file_io.h"
-#include "apr_strings.h"
-#include <apr_base64.h>
-#include "mod_cache.h"
-#include "mod_disk_cache.h"
+#include <apr-1.0/apr_file_io.h>
+#include <apr-1.0/apr_strings.h>
+#include <apr-1.0/apr_base64.h>
+#include <apr-1.0/apr_lib.h>
+#include <apr-1.0/apr_date.h>
 #include "ap_provider.h"
 #include "util_filter.h"
 #include "util_script.h"
 #include "util_charset.h"
+#include <http_log.h>
+#include <http_protocol.h>
 
 #include "crccache.h"
 #include "ap_wrapper.h"
 #include <crcsync/crcsync.h>
 #include <zlib.h>
-#include <openssl/evp.h>
+
+#include "mod_crccache_client.h"
+
+static ap_filter_rec_t *crccache_decode_filter_handle;
+
+/* Handles for cache filters, resolved at startup to eliminate
+ * a name-to-function mapping on each request
+ */
+static ap_filter_rec_t *cache_save_filter_handle;
+static ap_filter_rec_t *cache_save_subreq_filter_handle;
+static ap_filter_rec_t *cache_out_filter_handle;
+static ap_filter_rec_t *cache_out_subreq_filter_handle;
+static ap_filter_rec_t *cache_remove_url_filter_handle;
 
 /*
  * mod_disk_cache: Disk Based HTTP 1.1 Cache.
@@ -76,56 +90,28 @@
  */
 
 module AP_MODULE_DECLARE_DATA crccache_client_module;
+APR_OPTIONAL_FN_TYPE(ap_cache_generate_key) *cache_generate_key;
 
-/* Forward declarations */
-static int remove_entity(cache_handle_t *h);
-static apr_status_t store_headers(cache_handle_t *h, request_rec *r,
-		cache_info *i);
-static apr_status_t store_body(cache_handle_t *h, request_rec *r,
-		apr_bucket_brigade *b);
-static apr_status_t recall_headers(cache_handle_t *h, request_rec *r);
-static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
-		apr_bucket_brigade *bb);
-static apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
-		apr_file_t *file);
 
-static ap_filter_rec_t *crccache_decode_filter_handle;
+static int cache_post_config(apr_pool_t *p, apr_pool_t *plog,
+                             apr_pool_t *ptemp, server_rec *s)
+{
+    /* This is the means by which unusual (non-unix) os's may find alternate
+     * means to run a given command (e.g. shebang/registry parsing on Win32)
+     */
+    cache_generate_key = APR_RETRIEVE_OPTIONAL_FN(ap_cache_generate_key);
+    if (!cache_generate_key) {
+        cache_generate_key = cache_generate_key_default;
+    }
+    return OK;
+}
 
-typedef enum decoding_state {
-	DECODING_NEW_SECTION,
-	DECODING_COMPRESSED,
-	DECODING_LITERAL,
-	DECODING_HASH,
-	DECODING_BLOCK_HEADER,
-	DECODING_BLOCK
-} decoding_state;
-
-typedef enum {
-	DECOMPRESSION_INITIALIZED,
-	DECOMPRESSION_ENDED
-} decompression_state_t;
-
-typedef struct crccache_client_ctx_t {
-	apr_bucket_brigade *bb;
-	size_t block_size;
-	size_t tail_block_size;
-	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
-
-	decoding_state state;
-	decompression_state_t decompression_state;
-	z_stream *decompression_stream;
-	int headers_checked;
-	EVP_MD_CTX mdctx;
-	unsigned char md_value_calc[EVP_MAX_MD_SIZE];
-	unsigned char md_value_rx[EVP_MAX_MD_SIZE];
-	unsigned md_value_rx_count;
-} crccache_client_ctx;
 
 /*
  * Local static functions
  */
 
-static char *header_file(apr_pool_t *p, disk_cache_conf *conf,
+static char *header_file(apr_pool_t *p, crccache_client_conf *conf,
 		disk_cache_object_t *dobj, const char *name) {
 	if (!dobj->hashfile) {
 		dobj->hashfile = ap_cache_generate_name(p, conf->dirlevels,
@@ -141,7 +127,7 @@ static char *header_file(apr_pool_t *p, disk_cache_conf *conf,
 	}
 }
 
-static char *data_file(apr_pool_t *p, disk_cache_conf *conf,
+static char *data_file(apr_pool_t *p, crccache_client_conf *conf,
 		disk_cache_object_t *dobj, const char *name) {
 	if (!dobj->hashfile) {
 		dobj->hashfile = ap_cache_generate_name(p, conf->dirlevels,
@@ -157,7 +143,7 @@ static char *data_file(apr_pool_t *p, disk_cache_conf *conf,
 	}
 }
 
-static void mkdir_structure(disk_cache_conf *conf, const char *file,
+static void mkdir_structure(crccache_client_conf *conf, const char *file,
 		apr_pool_t *pool) {
 	apr_status_t rv;
 	char *p;
@@ -180,7 +166,7 @@ static void mkdir_structure(disk_cache_conf *conf, const char *file,
 /* htcacheclean may remove directories underneath us.
  * So, we'll try renaming three times at a cost of 0.002 seconds.
  */
-static apr_status_t safe_file_rename(disk_cache_conf *conf, const char *src,
+static apr_status_t safe_file_rename(crccache_client_conf *conf, const char *src,
 		const char *dest, apr_pool_t *pool) {
 	apr_status_t rv;
 
@@ -363,9 +349,9 @@ static void tokens_to_array(apr_pool_t *p, const char *data,
 /*
  * Hook and mod_cache callback functions
  */
-static int create_entity(cache_handle_t *h, request_rec *r, const char *key,
+int create_entity(cache_handle_t *h, request_rec *r, const char *key,
 		apr_off_t len) {
-	disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
 	cache_object_t *obj;
 	disk_cache_object_t *dobj;
@@ -392,13 +378,13 @@ static int create_entity(cache_handle_t *h, request_rec *r, const char *key,
 	return OK;
 }
 
-static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
+int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 	apr_uint32_t format;
 	apr_size_t len;
 	const char *nkey;
 	apr_status_t rc;
 	static int error_logged = 0;
-	disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
 	apr_finfo_t finfo;
 	cache_object_t *obj;
@@ -520,14 +506,14 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     return OK;
 }
 
-static int remove_entity(cache_handle_t *h) {
+int remove_entity(cache_handle_t *h) {
 	/* Null out the cache object pointer so next time we start from scratch  */
 	h->cache_obj = NULL;
 
 	return OK;
 }
 
-static int remove_url(cache_handle_t *h, apr_pool_t *p) {
+int remove_url(cache_handle_t *h, apr_pool_t *p) {
 	apr_status_t rc;
 	disk_cache_object_t *dobj;
 
@@ -613,7 +599,7 @@ static int remove_url(cache_handle_t *h, apr_pool_t *p) {
 	return OK;
 }
 
-static apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
+apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
 		apr_file_t *file) {
 	char w[MAX_STRING_LEN];
 	int p;
@@ -677,7 +663,7 @@ static apr_status_t store_array(apr_file_t *fd, apr_array_header_t* arr) {
 			&amt);
 }
 
-static apr_status_t read_table(cache_handle_t *handle, request_rec *r,
+apr_status_t read_table(cache_handle_t *handle, request_rec *r,
 		apr_table_t *table, apr_file_t *file) {
 	char w[MAX_STRING_LEN];
 	char *l;
@@ -762,7 +748,7 @@ static apr_status_t read_table(cache_handle_t *handle, request_rec *r,
  * Clean-up memory used by helper libraries, that don't know about apr_palloc
  * and that (probably) use classical malloc/free
  */
-static apr_status_t deflate_ctx_cleanup(void *data)
+apr_status_t deflate_ctx_cleanup(void *data)
 {
 	crccache_client_ctx *ctx = (crccache_client_ctx *)data;
 
@@ -785,7 +771,7 @@ static apr_status_t deflate_ctx_cleanup(void *data)
  * @@@: XXX: FIXME: currently the headers are passed thru un-merged.
  * Is that okay, or should they be collapsed where possible?
  */
-static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
+apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	const char *data;
 	apr_size_t len;
 	apr_bucket *e;
@@ -900,7 +886,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	return APR_SUCCESS;
 }
 
-static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
+apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 		apr_bucket_brigade *bb) {
 	apr_bucket *e;
 	disk_cache_object_t *dobj = (disk_cache_object_t*) h->cache_obj->vobj;
@@ -916,7 +902,7 @@ static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 	return APR_SUCCESS;
 }
 
-static apr_status_t store_table(apr_file_t *fd, apr_table_t *table) {
+apr_status_t store_table(apr_file_t *fd, apr_table_t *table) {
 	int i;
 	apr_status_t rv;
 	struct iovec iov[4];
@@ -949,9 +935,9 @@ static apr_status_t store_table(apr_file_t *fd, apr_table_t *table) {
 	return rv;
 }
 
-static apr_status_t store_headers(cache_handle_t *h, request_rec *r,
+apr_status_t store_headers(cache_handle_t *h, request_rec *r,
 		cache_info *info) {
-	disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
 
 	apr_status_t rv;
@@ -1115,13 +1101,13 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r,
     return APR_SUCCESS;
 }
 
-static apr_status_t store_body(cache_handle_t *h, request_rec *r,
+apr_status_t store_body(cache_handle_t *h, request_rec *r,
 		apr_bucket_brigade *bb) {
 	apr_bucket *e;
 	apr_status_t rv;
 
 	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
-	disk_cache_conf *conf = ap_get_module_config(r->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
 
 	/* We write to a temp file and then atomically rename the file over
@@ -1455,7 +1441,38 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 }
 
 static void *create_config(apr_pool_t *p, server_rec *s) {
-	disk_cache_conf *conf = apr_pcalloc(p, sizeof(disk_cache_conf));
+	crccache_client_conf *conf = apr_pcalloc(p, sizeof(crccache_client_conf));
+    /* array of URL prefixes for which caching is enabled */
+    conf->cacheenable = apr_array_make(p, 10, sizeof(struct cache_enable));
+    /* array of URL prefixes for which caching is enabled */
+    conf->cacheenable = apr_array_make(p, 10, sizeof(struct cache_enable));
+    /* array of URL prefixes for which caching is disabled */
+    conf->cachedisable = apr_array_make(p, 10, sizeof(struct cache_disable));
+    /* maximum time to cache a document */
+    conf->maxex = DEFAULT_CACHE_MAXEXPIRE;
+    conf->maxex_set = 0;
+    conf->minex = DEFAULT_CACHE_MINEXPIRE;
+    conf->minex_set = 0;
+    /* default time to cache a document */
+    conf->defex = DEFAULT_CACHE_EXPIRE;
+    conf->defex_set = 0;
+    /* factor used to estimate Expires date from LastModified date */
+    conf->factor = DEFAULT_CACHE_LMFACTOR;
+    conf->factor_set = 0;
+    conf->no_last_mod_ignore_set = 0;
+    conf->no_last_mod_ignore = 0;
+    conf->ignorecachecontrol = 0;
+    conf->ignorecachecontrol_set = 0;
+    conf->store_private = 0;
+    conf->store_private_set = 0;
+    conf->store_nostore = 0;
+    conf->store_nostore_set = 0;
+    /* array of headers that should not be stored in cache */
+    conf->ignore_headers = apr_array_make(p, 10, sizeof(char *));
+    conf->ignore_headers_set = CACHE_IGNORE_HEADERS_UNSET;
+    /* flag indicating that query-string should be ignored when caching */
+    conf->ignorequerystring = 0;
+    conf->ignorequerystring_set = 0;
 
 	/* XXX: Set default values */
 	conf->dirlevels = DEFAULT_DIRLEVELS;
@@ -1474,7 +1491,7 @@ static void *create_config(apr_pool_t *p, server_rec *s) {
  */
 static const char *set_cache_root(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_client_module);
 	conf->cache_root = arg;
 	conf->cache_root_len = strlen(arg);
@@ -1491,7 +1508,7 @@ static const char *set_cache_root(cmd_parms *parms, void *in_struct_ptr,
  */
 static const char *set_cache_dirlevels(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_client_module);
 	int val = atoi(arg);
 	if (val < 1)
@@ -1503,7 +1520,7 @@ static const char *set_cache_dirlevels(cmd_parms *parms, void *in_struct_ptr,
 }
 static const char *set_cache_dirlength(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_client_module);
 	int val = atoi(arg);
 	if (val < 1)
@@ -1517,7 +1534,7 @@ static const char *set_cache_dirlength(cmd_parms *parms, void *in_struct_ptr,
 
 static const char *set_cache_minfs(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_client_module);
 
 	if (apr_strtoff(&conf->minfs, arg, NULL, 0) != APR_SUCCESS || conf->minfs
@@ -1529,7 +1546,7 @@ static const char *set_cache_minfs(cmd_parms *parms, void *in_struct_ptr,
 
 static const char *set_cache_maxfs(cmd_parms *parms, void *in_struct_ptr,
 		const char *arg) {
-	disk_cache_conf *conf = ap_get_module_config(parms->server->module_config,
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
 			&crccache_client_module);
 	if (apr_strtoff(&conf->maxfs, arg, NULL, 0) != APR_SUCCESS || conf->maxfs
 			< 0) {
@@ -1538,24 +1555,988 @@ static const char *set_cache_maxfs(cmd_parms *parms, void *in_struct_ptr,
 	return NULL;
 }
 
-static const command_rec disk_cache_cmds[] = { AP_INIT_TAKE1("CacheRootClient", set_cache_root, NULL, RSRC_CONF,
-		"The directory to store cache files"), AP_INIT_TAKE1("CacheDirLevelsClient", set_cache_dirlevels, NULL, RSRC_CONF,
-		"The number of levels of subdirectories in the cache"), AP_INIT_TAKE1("CacheDirLengthClient", set_cache_dirlength, NULL, RSRC_CONF,
-		"The number of characters in subdirectory names"), AP_INIT_TAKE1("CacheMinFileSizeClient", set_cache_minfs, NULL, RSRC_CONF,
-		"The minimum file size to cache a document"), AP_INIT_TAKE1("CacheMaxFileSizeClient", set_cache_maxfs, NULL, RSRC_CONF,
-		"The maximum file size to cache a document"), { NULL } };
+static const char *add_crc_client_enable(cmd_parms *parms, void *dummy,
+                                    const char *type,
+                                    const char *url)
+{
+	crccache_client_conf *conf;
+    struct cache_enable *new;
 
-static const cache_provider crccache_client_provider = { &remove_entity,
+    if (*type == '/') {
+        return apr_psprintf(parms->pool,
+          "provider (%s) starts with a '/'.  Are url and provider switched?",
+          type);
+    }
+
+    conf =
+        (crccache_client_conf *)ap_get_module_config(parms->server->module_config,
+                                                  &crccache_client_module);
+    new = apr_array_push(conf->cacheenable);
+    new->type = type;
+    if (apr_uri_parse(parms->pool, url, &(new->url))) {
+        return NULL;
+    }
+    if (new->url.path) {
+        new->pathlen = strlen(new->url.path);
+    } else {
+        new->pathlen = 1;
+        new->url.path = "/";
+    }
+    return NULL;
+}
+
+static const command_rec disk_cache_cmds[] =
+{
+    AP_INIT_TAKE2("CRCClientEnable", add_crc_client_enable, NULL, RSRC_CONF, "A cache type and partial URL prefix below which caching is enabled"),
+	AP_INIT_TAKE1("CacheRootClient", set_cache_root, NULL, RSRC_CONF,"The directory to store cache files"),
+	AP_INIT_TAKE1("CacheDirLevelsClient", set_cache_dirlevels, NULL, RSRC_CONF, "The number of levels of subdirectories in the cache"),
+	AP_INIT_TAKE1("CacheDirLengthClient", set_cache_dirlength, NULL, RSRC_CONF, "The number of characters in subdirectory names"),
+	AP_INIT_TAKE1("CacheMinFileSizeClient", set_cache_minfs, NULL, RSRC_CONF, "The minimum file size to cache a document"),
+	AP_INIT_TAKE1("CacheMaxFileSizeClient", set_cache_maxfs, NULL, RSRC_CONF, "The maximum file size to cache a document"),
+	{ NULL }
+};
+
+int ap_run_insert_filter(request_rec *r);
+
+int cache_url_handler(request_rec *r, int lookup)
+{
+    apr_status_t rv;
+    const char *auth;
+    cache_request_rec *cache;
+    crccache_client_conf *conf;
+    apr_bucket_brigade *out;
+    ap_filter_t *next;
+    ap_filter_rec_t *cache_out_handle;
+
+    /* Delay initialization until we know we are handling a GET */
+    if (r->method_number != M_GET) {
+        return DECLINED;
+    }
+
+    conf = (crccache_client_conf *) ap_get_module_config(r->server->module_config,
+                                                      &crccache_client_module);
+
+    /* make space for the per request config */
+    cache = (cache_request_rec *) ap_get_module_config(r->request_config,
+                                                       &crccache_client_module);
+    if (!cache) {
+        cache = apr_pcalloc(r->pool, sizeof(cache_request_rec));
+        ap_set_module_config(r->request_config, &crccache_client_module, cache);
+    }
+
+    /*
+     * Are we allowed to serve cached info at all?
+     */
+
+    /* find certain cache controlling headers */
+    auth = apr_table_get(r->headers_in, "Authorization");
+
+    /* First things first - does the request allow us to return
+     * cached information at all? If not, just decline the request.
+     */
+    if (auth) {
+        return DECLINED;
+    }
+
+    /*
+     * Try to serve this request from the cache.
+     *
+     * If no existing cache file (DECLINED)
+     *   add cache_save filter
+     * If cached file (OK)
+     *   clear filter stack
+     *   add cache_out filter
+     *   return OK
+     */
+    rv = cache_select(r);
+    if (rv != OK) {
+        if (rv == DECLINED) {
+            if (!lookup) {
+
+                /*
+                 * Add cache_save filter to cache this request. Choose
+                 * the correct filter by checking if we are a subrequest
+                 * or not.
+                 */
+                if (r->main) {
+                    ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+                                 r->server,
+                                 "Adding CACHE_SAVE_SUBREQ filter for %s",
+                                 r->uri);
+                    ap_add_output_filter_handle(cache_save_subreq_filter_handle,
+                                                NULL, r, r->connection);
+                }
+                else {
+                    ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+                                 r->server, "Adding CACHE_SAVE filter for %s",
+                                 r->uri);
+                    ap_add_output_filter_handle(cache_save_filter_handle,
+                                                NULL, r, r->connection);
+                }
+
+                ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+                             "Adding CACHE_REMOVE_URL filter for %s",
+                             r->uri);
+
+                /* Add cache_remove_url filter to this request to remove a
+                 * stale cache entry if needed. Also put the current cache
+                 * request rec in the filter context, as the request that
+                 * is available later during running the filter maybe
+                 * different due to an internal redirect.
+                 */
+                cache->remove_url_filter =
+                    ap_add_output_filter_handle(cache_remove_url_filter_handle,
+                                                cache, r, r->connection);
+            }
+            else {
+                if (cache->stale_headers) {
+                    ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+                                 r->server, "Restoring request headers for %s",
+                                 r->uri);
+
+                    r->headers_in = cache->stale_headers;
+                }
+
+                /* Delete our per-request configuration. */
+                ap_set_module_config(r->request_config, &crccache_client_module, NULL);
+            }
+        }
+        else {
+            /* error */
+            ap_log_error(APLOG_MARK, APLOG_ERR, rv, r->server,
+                         "cache: error returned while checking for cached "
+                         "file by cache");
+        }
+        return DECLINED;
+    }
+
+    /* if we are a lookup, we are exiting soon one way or another; Restore
+     * the headers. */
+    if (lookup) {
+        if (cache->stale_headers) {
+            ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+                         "Restoring request headers.");
+            r->headers_in = cache->stale_headers;
+        }
+
+        /* Delete our per-request configuration. */
+        ap_set_module_config(r->request_config, &crccache_client_module, NULL);
+    }
+
+    rv = ap_meets_conditions(r);
+    if (rv != OK) {
+        /* If we are a lookup, we have to return DECLINED as we have no
+         * way of knowing if we will be able to serve the content.
+         */
+        if (lookup) {
+            return DECLINED;
+        }
+
+        /* Return cached status. */
+        return rv;
+    }
+
+    /* If we're a lookup, we can exit now instead of serving the content. */
+    if (lookup) {
+        return OK;
+    }
+
+    /* Serve up the content */
+
+    /* We are in the quick handler hook, which means that no output
+     * filters have been set. So lets run the insert_filter hook.
+     */
+    ap_run_insert_filter(r);
+
+    /*
+     * Add cache_out filter to serve this request. Choose
+     * the correct filter by checking if we are a subrequest
+     * or not.
+     */
+    if (r->main) {
+        cache_out_handle = cache_out_subreq_filter_handle;
+    }
+    else {
+        cache_out_handle = cache_out_filter_handle;
+    }
+    ap_add_output_filter_handle(cache_out_handle, NULL, r, r->connection);
+
+    /*
+     * Remove all filters that are before the cache_out filter. This ensures
+     * that we kick off the filter stack with our cache_out filter being the
+     * first in the chain. This make sense because we want to restore things
+     * in the same manner as we saved them.
+     * There may be filters before our cache_out filter, because
+     *
+     * 1. We call ap_set_content_type during cache_select. This causes
+     *    Content-Type specific filters to be added.
+     * 2. We call the insert_filter hook. This causes filters e.g. like
+     *    the ones set with SetOutputFilter to be added.
+     */
+    next = r->output_filters;
+    while (next && (next->frec != cache_out_handle)) {
+        ap_remove_output_filter(next);
+        next = next->next;
+    }
+
+    /* kick off the filter stack */
+    out = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+    rv = ap_pass_brigade(r->output_filters, out);
+    if (rv != APR_SUCCESS) {
+        if (rv != AP_FILTER_ERROR) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, rv, r->server,
+                         "cache: error returned while trying to return "
+                         "cached data");
+        }
+        return rv;
+    }
+
+    return OK;
+}
+
+
+
+/*
+ * CACHE_OUT filter
+ * ----------------
+ *
+ * Deliver cached content (headers and body) up the stack.
+ */
+int cache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb)
+{
+    request_rec *r = f->r;
+    cache_request_rec *cache;
+
+    cache = (cache_request_rec *) ap_get_module_config(r->request_config,
+                                                       &crccache_client_module);
+
+    if (!cache) {
+        /* user likely configured CACHE_OUT manually; they should use mod_cache
+         * configuration to do that */
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+                     "CACHE_OUT enabled unexpectedly");
+        ap_remove_output_filter(f);
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+                 "cache: running CACHE_OUT filter");
+
+    /* restore status of cached response */
+    /* XXX: This exposes a bug in mem_cache, since it does not
+     * restore the status into it's handle. */
+    r->status = cache->handle->cache_obj->info.status;
+
+    /* recall_headers() was called in cache_select() */
+    recall_body(cache->handle, r->pool, bb);
+
+    /* This filter is done once it has served up its content */
+    ap_remove_output_filter(f);
+
+    ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+                 "cache: serving %s", r->uri);
+    return ap_pass_brigade(f->next, bb);
+}
+
+
+/*
+ * CACHE_SAVE filter
+ * ---------------
+ *
+ * Decide whether or not this content should be cached.
+ * If we decide no it should not:
+ *   remove the filter from the chain
+ * If we decide yes it should:
+ *   Have we already started saving the response?
+ *      If we have started, pass the data to the storage manager via store_body
+ *      Otherwise:
+ *        Check to see if we *can* save this particular response.
+ *        If we can, call cache_create_entity() and save the headers and body
+ *   Finally, pass the data to the next filter (the network or whatever)
+ */
+
+int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
+{
+    int rv = !OK;
+    request_rec *r = f->r;
+    cache_request_rec *cache;
+    crccache_client_conf *conf;
+    const char *cc_out, *cl;
+    const char *exps, *lastmods, *dates, *etag;
+    apr_time_t exp, date, lastmod, now;
+    apr_off_t size;
+    cache_info *info = NULL;
+    char *reason;
+    apr_pool_t *p;
+
+    conf = (crccache_client_conf *) ap_get_module_config(r->server->module_config,
+                                                      &crccache_client_module);
+
+    /* Setup cache_request_rec */
+    cache = (cache_request_rec *) ap_get_module_config(r->request_config,
+                                                       &crccache_client_module);
+    if (!cache) {
+        /* user likely configured CACHE_SAVE manually; they should really use
+         * mod_cache configuration to do that
+         */
+        cache = apr_pcalloc(r->pool, sizeof(cache_request_rec));
+        ap_set_module_config(r->request_config, &crccache_client_module, cache);
+    }
+
+    reason = NULL;
+    p = r->pool;
+    /*
+     * Pass Data to Cache
+     * ------------------
+     * This section passes the brigades into the cache modules, but only
+     * if the setup section (see below) is complete.
+     */
+    if (cache->block_response) {
+        /* We've already sent down the response and EOS.  So, ignore
+         * whatever comes now.
+         */
+        return APR_SUCCESS;
+    }
+
+    /* have we already run the cachability check and set up the
+     * cached file handle?
+     */
+    if (cache->in_checked) {
+        /* pass the brigades into the cache, then pass them
+         * up the filter stack
+         */
+        rv = store_body(cache->handle, r, in);
+        if (rv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
+                         "cache: Cache provider's store_body failed!");
+            ap_remove_output_filter(f);
+        }
+        return ap_pass_brigade(f->next, in);
+    }
+
+    /*
+     * Setup Data in Cache
+     * -------------------
+     * This section opens the cache entity and sets various caching
+     * parameters, and decides whether this URL should be cached at
+     * all. This section is* run before the above section.
+     */
+
+    /* read expiry date; if a bad date, then leave it so the client can
+     * read it
+     */
+    exps = apr_table_get(r->err_headers_out, "Expires");
+    if (exps == NULL) {
+        exps = apr_table_get(r->headers_out, "Expires");
+    }
+    if (exps != NULL) {
+        if (APR_DATE_BAD == (exp = apr_date_parse_http(exps))) {
+            exps = NULL;
+        }
+    }
+    else {
+        exp = APR_DATE_BAD;
+    }
+
+    /* read the last-modified date; if the date is bad, then delete it */
+    lastmods = apr_table_get(r->err_headers_out, "Last-Modified");
+    if (lastmods == NULL) {
+        lastmods = apr_table_get(r->headers_out, "Last-Modified");
+    }
+    if (lastmods != NULL) {
+        lastmod = apr_date_parse_http(lastmods);
+        if (lastmod == APR_DATE_BAD) {
+            lastmods = NULL;
+        }
+    }
+    else {
+        lastmod = APR_DATE_BAD;
+    }
+
+    /* read the etag and cache-control from the entity */
+    etag = apr_table_get(r->err_headers_out, "Etag");
+    if (etag == NULL) {
+        etag = apr_table_get(r->headers_out, "Etag");
+    }
+    cc_out = apr_table_get(r->err_headers_out, "Cache-Control");
+    if (cc_out == NULL) {
+        cc_out = apr_table_get(r->headers_out, "Cache-Control");
+    }
+
+    /*
+     * what responses should we not cache?
+     *
+     * At this point we decide based on the response headers whether it
+     * is appropriate _NOT_ to cache the data from the server. There are
+     * a whole lot of conditions that prevent us from caching this data.
+     * They are tested here one by one to be clear and unambiguous.
+     */
+    if (r->status != HTTP_OK && r->status != HTTP_NON_AUTHORITATIVE
+        && r->status != HTTP_MULTIPLE_CHOICES
+        && r->status != HTTP_MOVED_PERMANENTLY
+        && r->status != HTTP_NOT_MODIFIED) {
+        /* RFC2616 13.4 we are allowed to cache 200, 203, 206, 300, 301 or 410
+         * We don't cache 206, because we don't (yet) cache partial responses.
+         * We include 304 Not Modified here too as this is the origin server
+         * telling us to serve the cached copy.
+         */
+        if (exps != NULL || cc_out != NULL) {
+            /* We are also allowed to cache any response given that it has a
+             * valid Expires or Cache Control header. If we find a either of
+             * those here,  we pass request through the rest of the tests. From
+             * the RFC:
+             *
+             * A response received with any other status code (e.g. status
+             * codes 302 and 307) MUST NOT be returned in a reply to a
+             * subsequent request unless there are cache-control directives or
+             * another header(s) that explicitly allow it. For example, these
+             * include the following: an Expires header (section 14.21); a
+             * "max-age", "s-maxage",  "must-revalidate", "proxy-revalidate",
+             * "public" or "private" cache-control directive (section 14.9).
+             */
+        }
+        else {
+            reason = apr_psprintf(p, "Response status %d", r->status);
+        }
+    }
+
+    if (reason) {
+        /* noop */
+    }
+    else if (exps != NULL && exp == APR_DATE_BAD) {
+        /* if a broken Expires header is present, don't cache it */
+        reason = apr_pstrcat(p, "Broken expires header: ", exps, NULL);
+    }
+    else if (exp != APR_DATE_BAD && exp < r->request_time)
+    {
+        /* if a Expires header is in the past, don't cache it */
+        reason = "Expires header already expired, not cacheable";
+    }
+    else if (!conf->ignorequerystring && r->parsed_uri.query && exps == NULL &&
+             !ap_cache_liststr(NULL, cc_out, "max-age", NULL)) {
+        /* if a query string is present but no explicit expiration time,
+         * don't cache it (RFC 2616/13.9 & 13.2.1)
+         */
+        reason = "Query string present but no explicit expiration time";
+    }
+    else if (r->status == HTTP_NOT_MODIFIED &&
+             !cache->handle && !cache->stale_handle) {
+        /* if the server said 304 Not Modified but we have no cache
+         * file - pass this untouched to the user agent, it's not for us.
+         */
+        reason = "HTTP Status 304 Not Modified";
+    }
+    else if (r->status == HTTP_OK && lastmods == NULL && etag == NULL
+             && (exps == NULL) && (conf->no_last_mod_ignore ==0)) {
+        /* 200 OK response from HTTP/1.0 and up without Last-Modified,
+         * Etag, or Expires headers.
+         */
+        /* Note: mod-include clears last_modified/expires/etags - this
+         * is why we have an optional function for a key-gen ;-)
+         */
+        reason = "No Last-Modified, Etag, or Expires headers";
+    }
+    else if (r->header_only && !cache->stale_handle) {
+        /* Forbid HEAD requests unless we have it cached already */
+        reason = "HTTP HEAD request";
+    }
+    else if (!conf->store_nostore &&
+             ap_cache_liststr(NULL, cc_out, "no-store", NULL)) {
+        /* RFC2616 14.9.2 Cache-Control: no-store response
+         * indicating do not cache, or stop now if you are
+         * trying to cache it.
+         */
+        /* FIXME: The Cache-Control: no-store could have come in on a 304,
+         * FIXME: while the original request wasn't conditional.  IOW, we
+         * FIXME:  made the the request conditional earlier to revalidate
+         * FIXME: our cached response.
+         */
+        reason = "Cache-Control: no-store present";
+    }
+    else if (!conf->store_private &&
+             ap_cache_liststr(NULL, cc_out, "private", NULL)) {
+        /* RFC2616 14.9.1 Cache-Control: private response
+         * this object is marked for this user's eyes only. Behave
+         * as a tunnel.
+         */
+        /* FIXME: See above (no-store) */
+        reason = "Cache-Control: private present";
+    }
+    else if (apr_table_get(r->headers_in, "Authorization") != NULL
+             && !(ap_cache_liststr(NULL, cc_out, "s-maxage", NULL)
+                  || ap_cache_liststr(NULL, cc_out, "must-revalidate", NULL)
+                  || ap_cache_liststr(NULL, cc_out, "public", NULL))) {
+        /* RFC2616 14.8 Authorisation:
+         * if authorisation is included in the request, we don't cache,
+         * but we can cache if the following exceptions are true:
+         * 1) If Cache-Control: s-maxage is included
+         * 2) If Cache-Control: must-revalidate is included
+         * 3) If Cache-Control: public is included
+         */
+        reason = "Authorization required";
+    }
+    else if (ap_cache_liststr(NULL,
+                              apr_table_get(r->headers_out, "Vary"),
+                              "*", NULL)) {
+        reason = "Vary header contains '*'";
+    }
+    else if (apr_table_get(r->subprocess_env, "no-cache") != NULL) {
+        reason = "environment variable 'no-cache' is set";
+    }
+    else if (r->no_cache) {
+        /* or we've been asked not to cache it above */
+        reason = "r->no_cache present";
+    }
+
+    if (reason) {
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
+                     "cache: %s not cached. Reason: %s", r->unparsed_uri,
+                     reason);
+
+        /* remove this filter from the chain */
+        ap_remove_output_filter(f);
+
+        /* ship the data up the stack */
+        return ap_pass_brigade(f->next, in);
+    }
+
+    /* Make it so that we don't execute this path again. */
+    cache->in_checked = 1;
+
+    /* Set the content length if known.
+     */
+    cl = apr_table_get(r->err_headers_out, "Content-Length");
+    if (cl == NULL) {
+        cl = apr_table_get(r->headers_out, "Content-Length");
+    }
+    if (cl) {
+        char *errp;
+        if (apr_strtoff(&size, cl, &errp, 10) || *errp || size < 0) {
+            cl = NULL; /* parse error, see next 'if' block */
+        }
+    }
+
+    if (!cl) {
+        /* if we don't get the content-length, see if we have all the
+         * buckets and use their length to calculate the size
+         */
+        apr_bucket *e;
+        int all_buckets_here=0;
+        int unresolved_length = 0;
+        size=0;
+        for (e = APR_BRIGADE_FIRST(in);
+             e != APR_BRIGADE_SENTINEL(in);
+             e = APR_BUCKET_NEXT(e))
+        {
+            if (APR_BUCKET_IS_EOS(e)) {
+                all_buckets_here=1;
+                break;
+            }
+            if (APR_BUCKET_IS_FLUSH(e)) {
+                unresolved_length = 1;
+                continue;
+            }
+            if (e->length == (apr_size_t)-1) {
+                break;
+            }
+            size += e->length;
+        }
+        if (!all_buckets_here) {
+            size = -1;
+        }
+    }
+
+    /* It's safe to cache the response.
+     *
+     * There are two possiblities at this point:
+     * - cache->handle == NULL. In this case there is no previously
+     * cached entity anywhere on the system. We must create a brand
+     * new entity and store the response in it.
+     * - cache->stale_handle != NULL. In this case there is a stale
+     * entity in the system which needs to be replaced by new
+     * content (unless the result was 304 Not Modified, which means
+     * the cached entity is actually fresh, and we should update
+     * the headers).
+     */
+
+    /* Did we have a stale cache entry that really is stale?
+     *
+     * Note that for HEAD requests, we won't get the body, so for a stale
+     * HEAD request, we don't remove the entity - instead we let the
+     * CACHE_REMOVE_URL filter remove the stale item from the cache.
+     */
+    if (cache->stale_handle) {
+        if (r->status == HTTP_NOT_MODIFIED) {
+            /* Oh, hey.  It isn't that stale!  Yay! */
+            cache->handle = cache->stale_handle;
+            info = &cache->handle->cache_obj->info;
+            rv = OK;
+        }
+        else if (!r->header_only) {
+            /* Oh, well.  Toss it. */
+            remove_entity(cache->stale_handle);
+            /* Treat the request as if it wasn't conditional. */
+            cache->stale_handle = NULL;
+            /*
+             * Restore the original request headers as they may be needed
+             * by further output filters like the byterange filter to make
+             * the correct decisions.
+             */
+            r->headers_in = cache->stale_headers;
+        }
+    }
+
+    /* no cache handle, create a new entity only for non-HEAD requests */
+    if (!cache->handle && !r->header_only) {
+        rv = cache_create_entity(r, size);
+        info = apr_pcalloc(r->pool, sizeof(cache_info));
+        /* We only set info->status upon the initial creation. */
+        info->status = r->status;
+    }
+
+    if (rv != OK) {
+        /* Caching layer declined the opportunity to cache the response */
+        ap_remove_output_filter(f);
+        return ap_pass_brigade(f->next, in);
+    }
+
+    ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
+                 "cache: Caching url: %s", r->unparsed_uri);
+
+    /* We are actually caching this response. So it does not
+     * make sense to remove this entity any more.
+     */
+    ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
+                 "cache: Removing CACHE_REMOVE_URL filter.");
+    ap_remove_output_filter(cache->remove_url_filter);
+
+    /*
+     * We now want to update the cache file header information with
+     * the new date, last modified, expire and content length and write
+     * it away to our cache file. First, we determine these values from
+     * the response, using heuristics if appropriate.
+     *
+     * In addition, we make HTTP/1.1 age calculations and write them away
+     * too.
+     */
+
+    /* Read the date. Generate one if one is not supplied */
+    dates = apr_table_get(r->err_headers_out, "Date");
+    if (dates == NULL) {
+        dates = apr_table_get(r->headers_out, "Date");
+    }
+    if (dates != NULL) {
+        info->date = apr_date_parse_http(dates);
+    }
+    else {
+        info->date = APR_DATE_BAD;
+    }
+
+    now = apr_time_now();
+    if (info->date == APR_DATE_BAD) {  /* No, or bad date */
+        /* no date header (or bad header)! */
+        info->date = now;
+    }
+    date = info->date;
+
+    /* set response_time for HTTP/1.1 age calculations */
+    info->response_time = now;
+
+    /* get the request time */
+    info->request_time = r->request_time;
+
+    /* check last-modified date */
+    if (lastmod != APR_DATE_BAD && lastmod > date) {
+        /* if it's in the future, then replace by date */
+        lastmod = date;
+        lastmods = dates;
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0,
+                     r->server,
+                     "cache: Last modified is in the future, "
+                     "replacing with now");
+    }
+
+    /* if no expiry date then
+     *   if Cache-Control: max-age
+     *      expiry date = date + max-age
+     *   else if lastmod
+     *      expiry date = date + min((date - lastmod) * factor, maxexpire)
+     *   else
+     *      expire date = date + defaultexpire
+     */
+    if (exp == APR_DATE_BAD) {
+        char *max_age_val;
+
+        if (ap_cache_liststr(r->pool, cc_out, "max-age", &max_age_val) &&
+            max_age_val != NULL) {
+            apr_int64_t x;
+
+            errno = 0;
+            x = apr_atoi64(max_age_val);
+            if (errno) {
+                x = conf->defex;
+            }
+            else {
+                x = x * MSEC_ONE_SEC;
+            }
+            if (x < conf->minex) {
+                x = conf->minex;
+            }
+            if (x > conf->maxex) {
+                x = conf->maxex;
+            }
+            exp = date + x;
+        }
+        else if ((lastmod != APR_DATE_BAD) && (lastmod < date)) {
+            /* if lastmod == date then you get 0*conf->factor which results in
+             * an expiration time of now. This causes some problems with
+             * freshness calculations, so we choose the else path...
+             */
+            apr_time_t x = (apr_time_t) ((date - lastmod) * conf->factor);
+
+            if (x < conf->minex) {
+                x = conf->minex;
+            }
+            if (x > conf->maxex) {
+                x = conf->maxex;
+            }
+            exp = date + x;
+        }
+        else {
+            exp = date + conf->defex;
+        }
+    }
+    info->expire = exp;
+
+    /* We found a stale entry which wasn't really stale. */
+    if (cache->stale_handle) {
+        /* Load in the saved status and clear the status line. */
+        r->status = info->status;
+        r->status_line = NULL;
+
+        /* RFC 2616 10.3.5 states that entity headers are not supposed
+         * to be in the 304 response.  Therefore, we need to combine the
+         * response headers with the cached headers *before* we update
+         * the cached headers.
+         *
+         * However, before doing that, we need to first merge in
+         * err_headers_out and we also need to strip any hop-by-hop
+         * headers that might have snuck in.
+         */
+        r->headers_out = ap_cache_cacheable_headers_out(r);
+
+        /* Merge in our cached headers.  However, keep any updated values. */
+        ap_cache_accept_headers(cache->handle, r, 1);
+    }
+
+    /* Write away header information to cache. It is possible that we are
+     * trying to update headers for an entity which has already been cached.
+     *
+     * This may fail, due to an unwritable cache area. E.g. filesystem full,
+     * permissions problems or a read-only (re)mount. This must be handled
+     * later.
+     */
+    rv = store_headers(cache->handle, r, info);
+
+    /* Did we just update the cached headers on a revalidated response?
+     *
+     * If so, we can now decide what to serve to the client.  This is done in
+     * the same way as with a regular response, but conditions are now checked
+     * against the cached or merged response headers.
+     */
+    if (cache->stale_handle) {
+        apr_bucket_brigade *bb;
+        apr_bucket *bkt;
+        int status;
+
+        bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+
+        /* Restore the original request headers and see if we need to
+         * return anything else than the cached response (ie. the original
+         * request was conditional).
+         */
+        r->headers_in = cache->stale_headers;
+        status = ap_meets_conditions(r);
+        if (status != OK) {
+            r->status = status;
+
+            bkt = apr_bucket_flush_create(bb->bucket_alloc);
+            APR_BRIGADE_INSERT_TAIL(bb, bkt);
+        }
+        else {
+            recall_body(cache->handle, r->pool, bb);
+        }
+
+        cache->block_response = 1;
+
+        /* Before returning we need to handle the possible case of an
+         * unwritable cache. Rather than leaving the entity in the cache
+         * and having it constantly re-validated, now that we have recalled
+         * the body it is safe to try and remove the url from the cache.
+         */
+        if (rv != APR_SUCCESS) {
+            ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
+                         "cache: updating headers with store_headers failed. "
+                         "Removing cached url.");
+
+            rv = remove_url(cache->stale_handle, r->pool);
+            if (rv != OK) {
+                /* Probably a mod_disk_cache cache area has been (re)mounted
+                 * read-only, or that there is a permissions problem.
+                 */
+                ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
+                     "cache: attempt to remove url from cache unsuccessful.");
+            }
+        }
+
+        return ap_pass_brigade(f->next, bb);
+    }
+
+    if(rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
+                     "cache: store_headers failed");
+        ap_remove_output_filter(f);
+
+        return ap_pass_brigade(f->next, in);
+    }
+
+    rv = store_body(cache->handle, r, in);
+    if (rv != APR_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
+                     "cache: store_body failed");
+        ap_remove_output_filter(f);
+    }
+
+    return ap_pass_brigade(f->next, in);
+}
+
+
+/*
+ * CACHE_REMOVE_URL filter
+ * ---------------
+ *
+ * This filter gets added in the quick handler every time the CACHE_SAVE filter
+ * gets inserted. Its purpose is to remove a confirmed stale cache entry from
+ * the cache.
+ *
+ * CACHE_REMOVE_URL has to be a protocol filter to ensure that is run even if
+ * the response is a canned error message, which removes the content filters
+ * and thus the CACHE_SAVE filter from the chain.
+ *
+ * CACHE_REMOVE_URL expects cache request rec within its context because the
+ * request this filter runs on can be different from the one whose cache entry
+ * should be removed, due to internal redirects.
+ *
+ * Note that CACHE_SAVE_URL (as a content-set filter, hence run before the
+ * protocol filters) will remove this filter if it decides to cache the file.
+ * Therefore, if this filter is left in, it must mean we need to toss any
+ * existing files.
+ */
+int cache_remove_url_filter(ap_filter_t *f, apr_bucket_brigade *in)
+{
+    request_rec *r = f->r;
+    cache_request_rec *cache;
+
+    /* Setup cache_request_rec */
+    cache = (cache_request_rec *) f->ctx;
+
+    if (!cache) {
+        /* user likely configured CACHE_REMOVE_URL manually; they should really
+         * use mod_cache configuration to do that. So:
+         * 1. Remove ourselves
+         * 2. Do nothing and bail out
+         */
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
+                     "cache: CACHE_REMOVE_URL enabled unexpectedly");
+        ap_remove_output_filter(f);
+        return ap_pass_brigade(f->next, in);
+    }
+    /* Now remove this cache entry from the cache */
+    cache_remove_url(cache, r->pool);
+
+    /* remove ourselves */
+    ap_remove_output_filter(f);
+    return ap_pass_brigade(f->next, in);
+}
+
+
+/*static const cache_provider crccache_client_provider = { &remove_entity,
 		&store_headers, &store_body, &recall_headers, &recall_body,
 		&create_entity, &open_entity, &remove_url, };
-
+*/
 static void disk_cache_register_hook(apr_pool_t *p) {
 	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
 			"Registering crccache client module, (C) 2009, Toby Collett");
 
+    /* cache initializer */
+    /* cache handler */
+    ap_hook_quick_handler(cache_url_handler, NULL, NULL, APR_HOOK_FIRST);
+    /* cache filters
+     * XXX The cache filters need to run right after the handlers and before
+     * any other filters. Consider creating AP_FTYPE_CACHE for this purpose.
+     *
+     * Depending on the type of request (subrequest / main request) they
+     * need to be run before AP_FTYPE_CONTENT_SET / after AP_FTYPE_CONTENT_SET
+     * filters. Thus create two filter handles for each type:
+     * cache_save_filter_handle / cache_out_filter_handle to be used by
+     * main requests and
+     * cache_save_subreq_filter_handle / cache_out_subreq_filter_handle
+     * to be run by subrequest
+     */
+    /*
+     * CACHE_SAVE must go into the filter chain after a possible DEFLATE
+     * filter to ensure that the compressed content is stored.
+     * Incrementing filter type by 1 ensures his happens.
+     */
+    cache_save_filter_handle =
+        ap_register_output_filter("CACHE_SAVE",
+                                  cache_save_filter,
+                                  NULL,
+                                  AP_FTYPE_CONTENT_SET+1);
+    /*
+     * CACHE_SAVE_SUBREQ must go into the filter chain before SUBREQ_CORE to
+     * handle subrequsts. Decrementing filter type by 1 ensures this
+     * happens.
+     */
+    cache_save_subreq_filter_handle =
+        ap_register_output_filter("CACHE_SAVE_SUBREQ",
+                                  cache_save_filter,
+                                  NULL,
+                                  AP_FTYPE_CONTENT_SET-1);
+    /*
+     * CACHE_OUT must go into the filter chain after a possible DEFLATE
+     * filter to ensure that already compressed cache objects do not
+     * get compressed again. Incrementing filter type by 1 ensures
+     * his happens.
+     */
+    cache_out_filter_handle =
+        ap_register_output_filter("CACHE_OUT",
+                                  cache_out_filter,
+                                  NULL,
+                                  AP_FTYPE_CONTENT_SET+1);
+    /*
+     * CACHE_OUT_SUBREQ must go into the filter chain before SUBREQ_CORE to
+     * handle subrequsts. Decrementing filter type by 1 ensures this
+     * happens.
+     */
+    cache_out_subreq_filter_handle =
+        ap_register_output_filter("CACHE_OUT_SUBREQ",
+                                  cache_out_filter,
+                                  NULL,
+                                  AP_FTYPE_CONTENT_SET-1);
+    /* CACHE_REMOVE_URL has to be a protocol filter to ensure that is
+     * run even if the response is a canned error message, which
+     * removes the content filters.
+     */
+    cache_remove_url_filter_handle =
+        ap_register_output_filter("CACHE_REMOVE_URL",
+                                  cache_remove_url_filter,
+                                  NULL,
+                                  AP_FTYPE_PROTOCOL);
+
 	/* cache initializer */
-	ap_register_provider(p, CACHE_PROVIDER_GROUP, "crccache_client", "0",
-			&crccache_client_provider);
+//	ap_register_provider(p, CACHE_PROVIDER_GROUP, "crccache_client", "0",
+//			&crccache_client_provider);
 	/*
 	 * CACHE_OUT must go into the filter chain after a possible DEFLATE
 	 * filter to ensure that already compressed cache objects do not
@@ -1565,6 +2546,9 @@ static void disk_cache_register_hook(apr_pool_t *p) {
 	crccache_decode_filter_handle = ap_register_output_filter(
 			"CRCCACHE_DECODE", crccache_decode_filter, NULL,
 			AP_FTYPE_CONTENT_SET + 1);
+
+	ap_hook_post_config(cache_post_config, NULL, NULL, APR_HOOK_REALLY_FIRST);
+
 }
 
 module AP_MODULE_DECLARE_DATA crccache_client_module = {
