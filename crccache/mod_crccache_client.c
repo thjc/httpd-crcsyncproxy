@@ -1861,9 +1861,10 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     request_rec *r = f->r;
     cache_request_rec *cache;
     crccache_client_conf *conf;
-    const char *cc_out, *cl;
-    const char *exps, *lastmods, *dates, *etag;
-    apr_time_t exp, date, lastmod, now;
+    //const char *cc_out, *cl;
+    const char *cl;
+    const char *exps, /* *lastmods,*/ *dates;//, *etag;
+    apr_time_t exp, date,/* lastmod,*/ now;
     apr_off_t size;
     cache_info *info = NULL;
     char *reason;
@@ -1937,7 +1938,8 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     else {
         exp = APR_DATE_BAD;
     }
-
+// we dont care about these
+#if 0
     /* read the last-modified date; if the date is bad, then delete it */
     lastmods = apr_table_get(r->err_headers_out, "Last-Modified");
     if (lastmods == NULL) {
@@ -1962,7 +1964,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     if (cc_out == NULL) {
         cc_out = apr_table_get(r->headers_out, "Cache-Control");
     }
-
+#endif
     /*
      * what responses should we not cache?
      *
@@ -1980,7 +1982,8 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          * We include 304 Not Modified here too as this is the origin server
          * telling us to serve the cached copy.
          */
-        if (exps != NULL || cc_out != NULL) {
+#if 0
+    	if (exps != NULL || cc_out != NULL) {
             /* We are also allowed to cache any response given that it has a
              * valid Expires or Cache Control header. If we find a either of
              * those here,  we pass request through the rest of the tests. From
@@ -1998,11 +2001,13 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         else {
             reason = apr_psprintf(p, "Response status %d", r->status);
         }
+#endif
     }
 
     if (reason) {
         /* noop */
     }
+#if 0
     else if (exps != NULL && exp == APR_DATE_BAD) {
         /* if a broken Expires header is present, don't cache it */
         reason = apr_pstrcat(p, "Broken expires header: ", exps, NULL);
@@ -2019,6 +2024,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         reason = "Query string present but no explicit expiration time";
     }
+#endif
     else if (r->status == HTTP_NOT_MODIFIED &&
              !cache->handle && !cache->stale_handle) {
         /* if the server said 304 Not Modified but we have no cache
@@ -2026,6 +2032,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         reason = "HTTP Status 304 Not Modified";
     }
+#if 0
     else if (r->status == HTTP_OK && lastmods == NULL && etag == NULL
              && (exps == NULL) && (conf->no_last_mod_ignore ==0)) {
         /* 200 OK response from HTTP/1.0 and up without Last-Modified,
@@ -2036,10 +2043,12 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         reason = "No Last-Modified, Etag, or Expires headers";
     }
+#endif
     else if (r->header_only && !cache->stale_handle) {
         /* Forbid HEAD requests unless we have it cached already */
         reason = "HTTP HEAD request";
     }
+#if 0
     else if (!conf->store_nostore &&
              ap_cache_liststr(NULL, cc_out, "no-store", NULL)) {
         /* RFC2616 14.9.2 Cache-Control: no-store response
@@ -2075,6 +2084,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         reason = "Authorization required";
     }
+
     else if (ap_cache_liststr(NULL,
                               apr_table_get(r->headers_out, "Vary"),
                               "*", NULL)) {
@@ -2087,7 +2097,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         /* or we've been asked not to cache it above */
         reason = "r->no_cache present";
     }
-
+#endif
     if (reason) {
         ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
                      "cache: %s not cached. Reason: %s", r->unparsed_uri,
@@ -2244,7 +2254,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
 
     /* get the request time */
     info->request_time = r->request_time;
-
+#if 0
     /* check last-modified date */
     if (lastmod != APR_DATE_BAD && lastmod > date) {
         /* if it's in the future, then replace by date */
@@ -2306,6 +2316,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
             exp = date + conf->defex;
         }
     }
+#endif
     info->expire = exp;
 
     /* We found a stale entry which wasn't really stale. */

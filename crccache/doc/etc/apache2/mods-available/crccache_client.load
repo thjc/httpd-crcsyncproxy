@@ -1,2 +1,2 @@
-# Depends: cache
+# Depends: deflate
 LoadModule crccache_client_module /home/tcollett/Projects/crcsync/crccache/mod_crccache_client.so

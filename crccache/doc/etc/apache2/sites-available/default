@@ -1,5 +1,6 @@
 <VirtualHost *:8080>
 	ServerName localhost
+	CRCClientEnable crccache_client /
 
 	# Make sure that gzip/deflate encoding
 	# is removed from the content before it is stored

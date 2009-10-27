@@ -208,7 +208,7 @@ int cache_select(request_rec *r)
         switch ((rv = open_entity(h, r, key))) {
         case OK: {
             char *vary = NULL;
-            int fresh;
+//            int fresh;
 
             if (recall_headers(h, r) != APR_SUCCESS) {
                 /* TODO: Handle this error */
@@ -271,8 +271,10 @@ int cache_select(request_rec *r)
 //            cache->provider_name = list->provider_name;
 
             /* Is our cached response fresh enough? */
-            fresh = ap_cache_check_freshness(h, r);
-            if (!fresh) {
+            // we are abusing the cache control headers so *never* mark an entry as fresh
+//            fresh = ap_cache_check_freshness(h, r);
+//            if (!fresh) {
+            if (0) {
                 const char *etag, *lastmod;
 
                 ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
@@ -334,6 +336,7 @@ int cache_select(request_rec *r)
 
                 return DECLINED;
             }
+            return DECLINED;
 
             /* Okay, this response looks okay.  Merge in our stuff and go. */
             ap_cache_accept_headers(h, r, 0);
