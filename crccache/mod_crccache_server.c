@@ -28,9 +28,9 @@
 
 #include <stdbool.h>
 
-#include <apr_file_io.h>
-#include <apr_strings.h>
-#include <apr_base64.h>
+#include <apr-1.0/apr_file_io.h>
+#include <apr-1.0/apr_strings.h>
+#include <apr-1.0/apr_base64.h>
 
 #include "ap_provider.h"
 
@@ -74,9 +74,10 @@ typedef struct crccache_ctx_t {
 	long crc_read_block_result;
 	size_t crc_read_block_ndigested;
 	apr_bucket_brigade *bb;
+	unsigned block_count;
 	size_t block_size;
 	size_t tail_block_size;
-	uint64_t hashes[FULL_BLOCK_COUNT+1];
+	uint64_t *hashes;
 	struct crc_context *crcctx;
 	size_t orig_length;
 	size_t tx_length;
@@ -167,9 +168,9 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				// failed to decode if block header so just process request normally
 				return OK;
 			}
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
 			free (hashes);
 			hashes = NULL;
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
 			// Insert mod_deflate's INFLATE filter in the chain to unzip content
 			// so that there is clear text available for the delta algorithm
 			ap_filter_t *inflate_filter = ap_add_output_filter("INFLATE", NULL, r, r->connection);
@@ -434,7 +435,7 @@ static apr_status_t process_block(ap_filter_t *f)
 	{
 		rslt = write_block_reference(f, rd_block_rslt);
 		unsigned char blocknum = (unsigned char) ((-rd_block_rslt)-1);
-		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == ctx->block_count) ? ctx->tail_block_size : ctx->block_size;
 	}
 
 	// Update the context with the results
@@ -477,7 +478,7 @@ static apr_status_t flush_block(ap_filter_t *f)
 	{
 		rslt = write_block_reference(f, rd_flush_rslt);
 		unsigned char blocknum = (unsigned char) ((-rd_flush_rslt)-1);
-		ctx->buffer_read_getpos += (blocknum == FULL_BLOCK_COUNT) ? ctx->tail_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == ctx->block_count) ? ctx->tail_block_size : ctx->block_size;
 	}
 
 	// Update the context with the results
@@ -739,15 +740,20 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
-
-		ctx->block_size = file_size/FULL_BLOCK_COUNT;
-		ctx->tail_block_size = file_size % FULL_BLOCK_COUNT;
-		size_t block_count_including_final_block = FULL_BLOCK_COUNT + (ctx->tail_block_size != 0);
-
 		// Decode the hashes
+		ctx->block_count = apr_base64_decode_len(hashes)/(HASH_SIZE/8);
+		// this may over allocate by a couple of bytes but no big deal
+		ctx->hashes = apr_palloc(r->pool, apr_base64_decode_len(hashes));
 		apr_base64_decode((char *)ctx->hashes, hashes);
 		free(hashes);
 		hashes = NULL;
+
+		ctx->block_size = file_size/ctx->block_count;
+		ctx->tail_block_size = ctx->block_size + file_size % ctx->block_count;
+		size_t block_count_including_final_block = ctx->block_count;// + (ctx->tail_block_size != 0);
+		ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, r->server,
+				"If-block header decoded, version %d: %d hashes of %d and one of %d", version, ctx->block_count-1,(int)ctx->block_size,(int)ctx->tail_block_size);
+
 		// swap to network byte order
 		int i;
 		for (i = 0; i < block_count_including_final_block;++i)
@@ -828,11 +834,10 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		crccache_check_etag(r, CRCCACHE_ENCODING);
 
 		// All is okay, so set response header to IM Used
-		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE Server end of context setup");
 		//r->status=226;
 		//r->status_line="226 IM Used";
 	}
-
 
 	while (!APR_BRIGADE_EMPTY(bb))
 	{

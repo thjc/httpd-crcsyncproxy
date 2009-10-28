@@ -41,6 +41,9 @@ int remove_url(cache_handle_t *h, apr_pool_t *p);
 int create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len);
 int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 
+// hashes per file
+#define FULL_BLOCK_COUNT 40
+
 typedef enum decoding_state {
 	DECODING_NEW_SECTION,
 	DECODING_COMPRESSED,

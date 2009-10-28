@@ -79,7 +79,7 @@ struct crc_context *crc_context_new(size_t block_size, unsigned crcbits,
 
 	assert(num_crcs > 0);
 	assert(block_size > 0);
-	assert(tail_size < block_size);
+//	assert(tail_size < block_size);
 
 	ctx = malloc(sizeof(*ctx) + sizeof(crc[0])*num_crcs);
 	if (ctx) {

@@ -46,6 +46,7 @@
 #include "crccache.h"
 #include "ap_wrapper.h"
 #include <crcsync/crcsync.h>
+#include <crc/crc.h>
 #include <zlib.h>
 
 #include "mod_crccache_client.h"
@@ -806,8 +807,8 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	// TODO: I think that we should just add %  to the trailing block, otherwise our extra block
 	// is always limited to max of BLOCK_COUNT size.
 	size_t blocksize = len/FULL_BLOCK_COUNT;
-	size_t tail_block_size = len % FULL_BLOCK_COUNT;
-	size_t block_count_including_final_block = FULL_BLOCK_COUNT + (tail_block_size != 0);
+	size_t tail_block_size = blocksize + len % FULL_BLOCK_COUNT;
+	size_t block_count_including_final_block = FULL_BLOCK_COUNT;// + (tail_block_size != 0);
 	// sanity check for very small files
 	if (blocksize> 4)
 	{
@@ -848,7 +849,11 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		char hash_set[HASH_HEADER_SIZE+1];
 
 		uint64_t crcs[block_count_including_final_block];
-		crc_of_blocks(data, len, blocksize, HASH_SIZE, crcs);
+		//crc_of_blocks(data, len, blocksize, HASH_SIZE, crcs);
+		for (i = 0; i < FULL_BLOCK_COUNT - 1; i++) {
+			crcs[i] = crc64_iso(0, &data[i*blocksize], blocksize);
+		}
+		crcs[FULL_BLOCK_COUNT] = crc64_iso(0, &data[(FULL_BLOCK_COUNT-1)*blocksize], tail_block_size);
 
 		// swap to network byte order
 		for (i = 0; i < block_count_including_final_block;++i)
@@ -1220,13 +1225,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			return ap_pass_brigade(f->next, bb);
 		}
 		// TODO: Remove crcsync from the content encoding header
-
-		// TODO: we should only set the status back to 200 if there are no
-		// other instance codings used
-		//r->status = 200;
-		//r->status_line = "200 OK";
-
-
+		// TODO: Remove If-block from the headers
 		// TODO: Fix up the etag as well
 	}
 
@@ -1263,7 +1262,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			/* This filter is done once it has served up its content */
 			ap_remove_output_filter(f);
 
-			// TODO: check strong hash here
+			// check strong hash here
 			unsigned md_len;
 			unsigned char md_value[EVP_MAX_MD_SIZE];
 			EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
@@ -1271,8 +1270,9 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 			if (memcmp(md_value, ctx->md_value_rx, 20) != 0)
 			{
-				// TODO: Actually signal this to the user
 				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED");
+				apr_brigade_cleanup(bb);
+				return APR_EGENERAL;
 			}
 			else
 			{
@@ -2470,11 +2470,6 @@ int cache_remove_url_filter(ap_filter_t *f, apr_bucket_brigade *in)
     return ap_pass_brigade(f->next, in);
 }
 
-
-/*static const cache_provider crccache_client_provider = { &remove_entity,
-		&store_headers, &store_body, &recall_headers, &recall_body,
-		&create_entity, &open_entity, &remove_url, };
-*/
 static void disk_cache_register_hook(apr_pool_t *p) {
 	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
 			"Registering crccache client module, (C) 2009, Toby Collett");
@@ -2545,9 +2540,6 @@ static void disk_cache_register_hook(apr_pool_t *p) {
                                   NULL,
                                   AP_FTYPE_PROTOCOL);
 
-	/* cache initializer */
-//	ap_register_provider(p, CACHE_PROVIDER_GROUP, "crccache_client", "0",
-//			&crccache_client_provider);
 	/*
 	 * CACHE_OUT must go into the filter chain after a possible DEFLATE
 	 * filter to ensure that already compressed cache objects do not
