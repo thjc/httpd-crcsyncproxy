@@ -1,14 +1,10 @@
 Documentation
-We need to specify the crc polynomial used in the standard document.
 We need to start reworking it to be suitable for circulating as an RFC, and
 hopefully begin the process of making it an official standard...
 
 Implementation
-Align the implementation with the current version of this document.
-Optimise how we send stream flushes and also how we cache. We should
-probably implement our own caching and drop the dependency on the apache mod
-cache code as we have different goals.
-Allow uncompressed literal blocks in response
-Change trailing block to be blocksize + extra instead of just having an 'extra' sized block
-strong hash
+-Optimise how we send stream flushes and also how we cache. We should
+-probably implement our own caching and drop the dependency on the apache mod
+-cache code as we have different goals. * dependency has been dropped, but implementation needs some work *
+-Cache cleanup.
 
