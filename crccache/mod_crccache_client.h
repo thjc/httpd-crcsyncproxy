@@ -47,7 +47,8 @@ int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 typedef enum decoding_state {
 	DECODING_NEW_SECTION,
 	DECODING_COMPRESSED,
-	DECODING_LITERAL,
+	DECODING_LITERAL_BODY,
+	DECODING_LITERAL_SIZE,
 	DECODING_HASH,
 	DECODING_BLOCK_HEADER,
 	DECODING_BLOCK
@@ -71,7 +72,9 @@ typedef struct crccache_client_ctx_t {
 	EVP_MD_CTX mdctx;
 	unsigned char md_value_calc[EVP_MAX_MD_SIZE];
 	unsigned char md_value_rx[EVP_MAX_MD_SIZE];
-	unsigned md_value_rx_count;
+	unsigned rx_count;
+	unsigned literal_size;
+	unsigned char * partial_literal;// original data so we can fill in the matched blocks
 } crccache_client_ctx;
 
 struct cache_enable {

@@ -1328,11 +1328,15 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					else if (data[consumed_bytes] == ENCODING_BLOCK)
 						ctx->state = DECODING_BLOCK_HEADER;
 					else if (data[consumed_bytes] == ENCODING_LITERAL)
-						ctx->state = DECODING_LITERAL;
+					{
+						ctx->state = DECODING_LITERAL_SIZE;
+						ctx->partial_literal = NULL;
+						ctx->rx_count = 0;
+					}
 					else if (data[consumed_bytes] == ENCODING_HASH)
 					{
 						ctx->state = DECODING_HASH;
-						ctx->md_value_rx_count = 0;
+						ctx->rx_count = 0;
 					}
 					else
 					{
@@ -1368,15 +1372,67 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 					break;
 				}
+				case DECODING_LITERAL_SIZE:
+				{
+					unsigned avail_in = len - consumed_bytes;
+					// if we havent got the full int then store the data for later
+					if (avail_in < 4 || ctx->rx_count != 0)
+					{
+						if (ctx->partial_literal == NULL)
+						{
+							ctx->partial_literal = apr_palloc(r->pool, 4);
+						}
+						unsigned len_to_copy = MIN(4-ctx->rx_count, avail_in);
+						memcpy(&ctx->partial_literal[ctx->rx_count], &data[consumed_bytes],len_to_copy);
+						ctx->rx_count += len_to_copy;
+						consumed_bytes += len_to_copy;
+
+						if (ctx->rx_count == 4)
+						{
+							ctx->literal_size = ntohl(*(unsigned*)ctx->partial_literal);
+							ctx->rx_count = 0;
+						}
+						else
+						{
+							break;
+						}
+					}
+					else
+					{
+						ctx->literal_size = ntohl(*(unsigned*)&data[consumed_bytes]);
+						consumed_bytes += 4;
+					}
+					ctx->partial_literal = apr_palloc(r->pool, ctx->literal_size);
+					ctx->state = DECODING_LITERAL_BODY;
+					break;
+				}
+				case DECODING_LITERAL_BODY:
+				{
+					unsigned avail_in = len - consumed_bytes;
+					unsigned len_to_copy = MIN(ctx->literal_size-ctx->rx_count, avail_in);
+					memcpy(&ctx->partial_literal[ctx->rx_count], &data[consumed_bytes],len_to_copy);
+					ctx->rx_count += len_to_copy;
+					consumed_bytes += len_to_copy;
+
+					if (ctx->rx_count == ctx->literal_size)
+					{
+						EVP_DigestUpdate(&ctx->mdctx, ctx->partial_literal, ctx->literal_size);
+						apr_bucket * b = apr_bucket_pool_create((char*)ctx->partial_literal, ctx->literal_size, r->pool, f->c->bucket_alloc);
+						APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
+						ctx->state = DECODING_NEW_SECTION;
+					}
+
+					break;
+				}
 				case DECODING_HASH:
 				{
 					unsigned avail_in = len - consumed_bytes;
 					// 20 bytes for an SHA1 hash
-					unsigned needed = MIN(20-ctx->md_value_rx_count, avail_in);
-					memcpy(&ctx->md_value_rx[ctx->md_value_rx_count], &data[consumed_bytes],needed);
-					ctx->md_value_rx_count+=needed;
+					unsigned needed = MIN(20-ctx->rx_count, avail_in);
+					memcpy(&ctx->md_value_rx[ctx->rx_count], &data[consumed_bytes],needed);
+					ctx->rx_count+=needed;
 					consumed_bytes += needed;
-					if (ctx->md_value_rx_count == 20)
+					if (ctx->rx_count == 20)
 					{
 						ctx->state = DECODING_NEW_SECTION;
 					}
