@@ -12,7 +12,7 @@ LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz -lcrypto
 
 all: mod_crccache_client.so mod_crccache_server.so benchmark
 
-CACHE_SRC=cache/cache_cache.o \
+CACHE_SRC=cache/cache.o cache/cache_cache.o \
 cache/cache_hash.o cache/cache_pqueue.o \
 cache/cache_util.o cache/cache_storage.o
 

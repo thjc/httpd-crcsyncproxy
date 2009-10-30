@@ -264,4 +264,23 @@ const char* cache_create_key( request_rec*r );
 #define MIN(a,b)                ((a) < (b) ? (a) : (b))
 #endif
 
+/* Forward declarations */
+int remove_entity(cache_handle_t *h);
+apr_status_t store_headers(cache_handle_t *h, request_rec *r,
+		cache_info *i);
+apr_status_t store_body(cache_handle_t *h, request_rec *r,
+		apr_bucket_brigade *b);
+apr_status_t recall_headers(cache_handle_t *h, request_rec *r);
+apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
+		apr_bucket_brigade *bb);
+apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
+		apr_file_t *file);
+
+int remove_url(cache_handle_t *h, apr_pool_t *p);
+int create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len);
+int open_entity(cache_handle_t *h, request_rec *r, const char *key);
+
+apr_status_t read_table(cache_handle_t *handle, request_rec *r, apr_table_t *table, apr_file_t *file);
+
+
 #endif /* CACHE_H_ */
