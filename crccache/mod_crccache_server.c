@@ -60,7 +60,7 @@ typedef enum  {
 
 //#define MIN(X,Y) (X<Y?X:Y)
 
-static void *create_config(apr_pool_t *p, server_rec *s) {
+static void *crccache_server_create_config(apr_pool_t *p, server_rec *s) {
 	crccache_server_conf *conf = apr_pcalloc(p, sizeof(crccache_server_conf));
 	return conf;
 }
@@ -101,7 +101,7 @@ static const char *set_crccache_server(cmd_parms *parms, void *dummy, int flag)
 	return NULL;
 }
 
-static const command_rec disk_cache_cmds[] =
+static const command_rec crccache_server_cmds[] =
 {
 	AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF, "Enable the CRCCache server in this virtual server"),
 	{ NULL }
@@ -152,7 +152,6 @@ int decode_if_block_header(const char * header, int * version, size_t * file_siz
 static int crccache_server_header_parser_handler(request_rec *r) {
 	crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_server_module);
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE handler");
 	if (conf->enabled)
 	{
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Checking for headers");
@@ -921,7 +920,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
     return return_code;
 }
 
-static void disk_cache_register_hook(apr_pool_t *p) {
+static void crccache_server_register_hook(apr_pool_t *p) {
 	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
 			"Registering crccache server module, (C) 2009, Toby Collett and Alex Wulms");
 
@@ -938,8 +937,8 @@ static void disk_cache_register_hook(apr_pool_t *p) {
 module AP_MODULE_DECLARE_DATA crccache_server_module = {
 		STANDARD20_MODULE_STUFF, NULL, /* create per-directory config structure */
 		NULL ,                       /* merge per-directory config structures */
-    create_config, /* create per-server config structure */
-NULL		, /* merge per-server config structures */
-		disk_cache_cmds, /* command apr_table_t */
-		disk_cache_register_hook /* register hooks */
+		crccache_server_create_config, /* create per-server config structure */
+		NULL		, /* merge per-server config structures */
+		crccache_server_cmds, /* command apr_table_t */
+		crccache_server_register_hook /* register hooks */
 	};

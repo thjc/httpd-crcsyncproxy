@@ -359,6 +359,9 @@ int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     flags = APR_READ|APR_BINARY|APR_BUFFERED;
     rc = apr_file_open(&dobj->hfd, dobj->hdrsfile, flags, 0, r->pool);
     if (rc != APR_SUCCESS) {
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+					 r->server, "Failed to open file");
+
         return DECLINED;
     }
 
