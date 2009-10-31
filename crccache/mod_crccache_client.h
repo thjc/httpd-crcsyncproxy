@@ -78,39 +78,6 @@ typedef struct {
 	// from mod cache
     apr_array_header_t *cacheenable;    /* URLs to cache */
     apr_array_header_t *cachedisable;   /* URLs not to cache */
-    /* Maximum time to keep cached files in msecs */
-    apr_time_t maxex;
-    int maxex_set;
-    /* default time to keep cached file in msecs */
-    apr_time_t defex;
-    int defex_set;
-    /* factor for estimating expires date */
-    double factor;
-    int factor_set;
-    /** ignore the last-modified header when deciding to cache this request */
-    int no_last_mod_ignore_set;
-    int no_last_mod_ignore;
-    /** ignore client's requests for uncached responses */
-    int ignorecachecontrol;
-    int ignorecachecontrol_set;
-    /** ignore Cache-Control: private header from server */
-    int store_private;
-    int store_private_set;
-    /** ignore Cache-Control: no-store header from client or server */
-    int store_nostore;
-    int store_nostore_set;
-    /** store the headers that should not be stored in the cache */
-    apr_array_header_t *ignore_headers;
-    /* flag if CacheIgnoreHeader has been set */
-    #define CACHE_IGNORE_HEADERS_SET   1
-    #define CACHE_IGNORE_HEADERS_UNSET 0
-    int ignore_headers_set;
-    /* Minimum time to keep cached files in msecs */
-    apr_time_t minex;
-    int minex_set;
-    /** ignore query-string when caching */
-    int ignorequerystring;
-    int ignorequerystring_set;
 
     // from mod diskcache
     const char* cache_root;

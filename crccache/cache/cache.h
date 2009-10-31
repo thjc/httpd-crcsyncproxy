@@ -182,14 +182,6 @@ CACHE_DECLARE(apr_time_t) ap_cache_current_age(cache_info *info, const apr_time_
                                                apr_time_t now);
 
 /**
- * Check the freshness of the cache object per RFC2616 section 13.2 (Expiration Model)
- * @param h cache_handle_t
- * @param r request_rec
- * @return 0 ==> cache object is stale, 1 ==> cache object is fresh
- */
-CACHE_DECLARE(int) ap_cache_check_freshness(cache_handle_t *h, request_rec *r);
-
-/**
  * Merge in cached headers into the response
  * @param h cache_handle_t
  * @param r request_rec
@@ -237,9 +229,7 @@ CACHE_DECLARE(apr_table_t *)ap_cache_cacheable_hdrs_out(apr_pool_t *pool,
 /**
  * cache_storage.c
  */
-int cache_remove_url(cache_request_rec *cache, apr_pool_t *p);
 int cache_create_entity(request_rec *r, apr_off_t size);
-int cache_select(request_rec *r);
 apr_status_t cache_generate_key_default( request_rec *r, apr_pool_t*p, char**key );
 /**
  * create a key for the cache based on the request record
@@ -276,7 +266,6 @@ apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
 		apr_file_t *file);
 
-int remove_url(cache_handle_t *h, apr_pool_t *p);
 int create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len);
 int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 

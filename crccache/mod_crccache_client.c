@@ -52,10 +52,6 @@
 #include "mod_crccache_client.h"
 
 static ap_filter_rec_t *crccache_decode_filter_handle;
-
-/* Handles for cache filters, resolved at startup to eliminate
- * a name-to-function mapping on each request
- */
 static ap_filter_rec_t *cache_save_filter_handle;
 static ap_filter_rec_t *cache_save_subreq_filter_handle;
 
@@ -529,31 +525,6 @@ static void *crccache_client_create_config(apr_pool_t *p, server_rec *s) {
     conf->cacheenable = apr_array_make(p, 10, sizeof(struct cache_enable));
     /* array of URL prefixes for which caching is disabled */
     conf->cachedisable = apr_array_make(p, 10, sizeof(struct cache_disable));
-    /* maximum time to cache a document */
-    conf->maxex = DEFAULT_CACHE_MAXEXPIRE;
-    conf->maxex_set = 0;
-    conf->minex = DEFAULT_CACHE_MINEXPIRE;
-    conf->minex_set = 0;
-    /* default time to cache a document */
-    conf->defex = DEFAULT_CACHE_EXPIRE;
-    conf->defex_set = 0;
-    /* factor used to estimate Expires date from LastModified date */
-    conf->factor = DEFAULT_CACHE_LMFACTOR;
-    conf->factor_set = 0;
-    conf->no_last_mod_ignore_set = 0;
-    conf->no_last_mod_ignore = 0;
-    conf->ignorecachecontrol = 0;
-    conf->ignorecachecontrol_set = 0;
-    conf->store_private = 0;
-    conf->store_private_set = 0;
-    conf->store_nostore = 0;
-    conf->store_nostore_set = 0;
-    /* array of headers that should not be stored in cache */
-    conf->ignore_headers = apr_array_make(p, 10, sizeof(char *));
-    conf->ignore_headers_set = CACHE_IGNORE_HEADERS_UNSET;
-    /* flag indicating that query-string should be ignored when caching */
-    conf->ignorequerystring = 0;
-    conf->ignorequerystring_set = 0;
 
 	/* XXX: Set default values */
 	conf->dirlevels = DEFAULT_DIRLEVELS;
@@ -857,33 +828,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     else {
         exp = APR_DATE_BAD;
     }
-// we dont care about these
-#if 0
-    /* read the last-modified date; if the date is bad, then delete it */
-    lastmods = apr_table_get(r->err_headers_out, "Last-Modified");
-    if (lastmods == NULL) {
-        lastmods = apr_table_get(r->headers_out, "Last-Modified");
-    }
-    if (lastmods != NULL) {
-        lastmod = apr_date_parse_http(lastmods);
-        if (lastmod == APR_DATE_BAD) {
-            lastmods = NULL;
-        }
-    }
-    else {
-        lastmod = APR_DATE_BAD;
-    }
 
-    /* read the etag and cache-control from the entity */
-    etag = apr_table_get(r->err_headers_out, "Etag");
-    if (etag == NULL) {
-        etag = apr_table_get(r->headers_out, "Etag");
-    }
-    cc_out = apr_table_get(r->err_headers_out, "Cache-Control");
-    if (cc_out == NULL) {
-        cc_out = apr_table_get(r->headers_out, "Cache-Control");
-    }
-#endif
     /*
      * what responses should we not cache?
      *
@@ -901,49 +846,12 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          * We include 304 Not Modified here too as this is the origin server
          * telling us to serve the cached copy.
          */
-#if 0
-    	if (exps != NULL || cc_out != NULL) {
-            /* We are also allowed to cache any response given that it has a
-             * valid Expires or Cache Control header. If we find a either of
-             * those here,  we pass request through the rest of the tests. From
-             * the RFC:
-             *
-             * A response received with any other status code (e.g. status
-             * codes 302 and 307) MUST NOT be returned in a reply to a
-             * subsequent request unless there are cache-control directives or
-             * another header(s) that explicitly allow it. For example, these
-             * include the following: an Expires header (section 14.21); a
-             * "max-age", "s-maxage",  "must-revalidate", "proxy-revalidate",
-             * "public" or "private" cache-control directive (section 14.9).
-             */
-        }
-        else {
-            reason = apr_psprintf(p, "Response status %d", r->status);
-        }
-#endif
     }
 
     if (reason) {
         /* noop */
     }
-#if 0
-    else if (exps != NULL && exp == APR_DATE_BAD) {
-        /* if a broken Expires header is present, don't cache it */
-        reason = apr_pstrcat(p, "Broken expires header: ", exps, NULL);
-    }
-    else if (exp != APR_DATE_BAD && exp < r->request_time)
-    {
-        /* if a Expires header is in the past, don't cache it */
-        reason = "Expires header already expired, not cacheable";
-    }
-    else if (!conf->ignorequerystring && r->parsed_uri.query && exps == NULL &&
-             !ap_cache_liststr(NULL, cc_out, "max-age", NULL)) {
-        /* if a query string is present but no explicit expiration time,
-         * don't cache it (RFC 2616/13.9 & 13.2.1)
-         */
-        reason = "Query string present but no explicit expiration time";
-    }
-#endif
+
     else if (r->status == HTTP_NOT_MODIFIED &&
              !cache->handle && !cache->stale_handle) {
         /* if the server said 304 Not Modified but we have no cache
@@ -951,72 +859,11 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         reason = "HTTP Status 304 Not Modified";
     }
-#if 0
-    else if (r->status == HTTP_OK && lastmods == NULL && etag == NULL
-             && (exps == NULL) && (conf->no_last_mod_ignore ==0)) {
-        /* 200 OK response from HTTP/1.0 and up without Last-Modified,
-         * Etag, or Expires headers.
-         */
-        /* Note: mod-include clears last_modified/expires/etags - this
-         * is why we have an optional function for a key-gen ;-)
-         */
-        reason = "No Last-Modified, Etag, or Expires headers";
-    }
-#endif
+
     else if (r->header_only && !cache->stale_handle) {
         /* Forbid HEAD requests unless we have it cached already */
         reason = "HTTP HEAD request";
     }
-#if 0
-    else if (!conf->store_nostore &&
-             ap_cache_liststr(NULL, cc_out, "no-store", NULL)) {
-        /* RFC2616 14.9.2 Cache-Control: no-store response
-         * indicating do not cache, or stop now if you are
-         * trying to cache it.
-         */
-        /* FIXME: The Cache-Control: no-store could have come in on a 304,
-         * FIXME: while the original request wasn't conditional.  IOW, we
-         * FIXME:  made the the request conditional earlier to revalidate
-         * FIXME: our cached response.
-         */
-        reason = "Cache-Control: no-store present";
-    }
-    else if (!conf->store_private &&
-             ap_cache_liststr(NULL, cc_out, "private", NULL)) {
-        /* RFC2616 14.9.1 Cache-Control: private response
-         * this object is marked for this user's eyes only. Behave
-         * as a tunnel.
-         */
-        /* FIXME: See above (no-store) */
-        reason = "Cache-Control: private present";
-    }
-    else if (apr_table_get(r->headers_in, "Authorization") != NULL
-             && !(ap_cache_liststr(NULL, cc_out, "s-maxage", NULL)
-                  || ap_cache_liststr(NULL, cc_out, "must-revalidate", NULL)
-                  || ap_cache_liststr(NULL, cc_out, "public", NULL))) {
-        /* RFC2616 14.8 Authorisation:
-         * if authorisation is included in the request, we don't cache,
-         * but we can cache if the following exceptions are true:
-         * 1) If Cache-Control: s-maxage is included
-         * 2) If Cache-Control: must-revalidate is included
-         * 3) If Cache-Control: public is included
-         */
-        reason = "Authorization required";
-    }
-
-    else if (ap_cache_liststr(NULL,
-                              apr_table_get(r->headers_out, "Vary"),
-                              "*", NULL)) {
-        reason = "Vary header contains '*'";
-    }
-    else if (apr_table_get(r->subprocess_env, "no-cache") != NULL) {
-        reason = "environment variable 'no-cache' is set";
-    }
-    else if (r->no_cache) {
-        /* or we've been asked not to cache it above */
-        reason = "r->no_cache present";
-    }
-#endif
     if (reason) {
         ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
                      "cache: %s not cached. Reason: %s", r->unparsed_uri,
@@ -1117,7 +964,17 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
 
     /* no cache handle, create a new entity only for non-HEAD requests */
     if (!cache->handle && !r->header_only) {
-        rv = cache_create_entity(r, size);
+        char *key;
+        cache_handle_t *h = apr_pcalloc(r->pool, sizeof(cache_handle_t));
+        rv = cache_generate_key(r, r->pool, &key);
+        if (rv != APR_SUCCESS) {
+            return rv;
+        }
+        rv = create_entity(h, r, key, size);
+        if (rv != APR_SUCCESS) {
+            return rv;
+        }
+        cache->handle = h;
         info = apr_pcalloc(r->pool, sizeof(cache_info));
         /* We only set info->status upon the initial creation. */
         info->status = r->status;
@@ -1173,69 +1030,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
 
     /* get the request time */
     info->request_time = r->request_time;
-#if 0
-    /* check last-modified date */
-    if (lastmod != APR_DATE_BAD && lastmod > date) {
-        /* if it's in the future, then replace by date */
-        lastmod = date;
-        lastmods = dates;
-        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0,
-                     r->server,
-                     "cache: Last modified is in the future, "
-                     "replacing with now");
-    }
 
-    /* if no expiry date then
-     *   if Cache-Control: max-age
-     *      expiry date = date + max-age
-     *   else if lastmod
-     *      expiry date = date + min((date - lastmod) * factor, maxexpire)
-     *   else
-     *      expire date = date + defaultexpire
-     */
-    if (exp == APR_DATE_BAD) {
-        char *max_age_val;
-
-        if (ap_cache_liststr(r->pool, cc_out, "max-age", &max_age_val) &&
-            max_age_val != NULL) {
-            apr_int64_t x;
-
-            errno = 0;
-            x = apr_atoi64(max_age_val);
-            if (errno) {
-                x = conf->defex;
-            }
-            else {
-                x = x * MSEC_ONE_SEC;
-            }
-            if (x < conf->minex) {
-                x = conf->minex;
-            }
-            if (x > conf->maxex) {
-                x = conf->maxex;
-            }
-            exp = date + x;
-        }
-        else if ((lastmod != APR_DATE_BAD) && (lastmod < date)) {
-            /* if lastmod == date then you get 0*conf->factor which results in
-             * an expiration time of now. This causes some problems with
-             * freshness calculations, so we choose the else path...
-             */
-            apr_time_t x = (apr_time_t) ((date - lastmod) * conf->factor);
-
-            if (x < conf->minex) {
-                x = conf->minex;
-            }
-            if (x > conf->maxex) {
-                x = conf->maxex;
-            }
-            exp = date + x;
-        }
-        else {
-            exp = date + conf->defex;
-        }
-    }
-#endif
     info->expire = exp;
 
     /* We found a stale entry which wasn't really stale. */
@@ -1268,60 +1063,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
      */
     rv = store_headers(cache->handle, r, info);
 
-    /* Did we just update the cached headers on a revalidated response?
-     *
-     * If so, we can now decide what to serve to the client.  This is done in
-     * the same way as with a regular response, but conditions are now checked
-     * against the cached or merged response headers.
-     */
-    if (cache->stale_handle) {
-        apr_bucket_brigade *bb;
-        apr_bucket *bkt;
-        int status;
-
-        bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-
-        /* Restore the original request headers and see if we need to
-         * return anything else than the cached response (ie. the original
-         * request was conditional).
-         */
-        r->headers_in = cache->stale_headers;
-        status = ap_meets_conditions(r);
-        if (status != OK) {
-            r->status = status;
-
-            bkt = apr_bucket_flush_create(bb->bucket_alloc);
-            APR_BRIGADE_INSERT_TAIL(bb, bkt);
-        }
-        else {
-            recall_body(cache->handle, r->pool, bb);
-        }
-
-        cache->block_response = 1;
-
-        /* Before returning we need to handle the possible case of an
-         * unwritable cache. Rather than leaving the entity in the cache
-         * and having it constantly re-validated, now that we have recalled
-         * the body it is safe to try and remove the url from the cache.
-         */
-        if (rv != APR_SUCCESS) {
-            ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
-                         "cache: updating headers with store_headers failed. "
-                         "Removing cached url.");
-
-            rv = remove_url(cache->stale_handle, r->pool);
-            if (rv != OK) {
-                /* Probably a mod_disk_cache cache area has been (re)mounted
-                 * read-only, or that there is a permissions problem.
-                 */
-                ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
-                     "cache: attempt to remove url from cache unsuccessful.");
-            }
-        }
-
-        return ap_pass_brigade(f->next, bb);
-    }
-
     if(rv != APR_SUCCESS) {
         ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
                      "cache: store_headers failed");
@@ -1337,55 +1078,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         ap_remove_output_filter(f);
     }
 
-    return ap_pass_brigade(f->next, in);
-}
-
-
-/*
- * CACHE_REMOVE_URL filter
- * ---------------
- *
- * This filter gets added in the quick handler every time the CACHE_SAVE filter
- * gets inserted. Its purpose is to remove a confirmed stale cache entry from
- * the cache.
- *
- * CACHE_REMOVE_URL has to be a protocol filter to ensure that is run even if
- * the response is a canned error message, which removes the content filters
- * and thus the CACHE_SAVE filter from the chain.
- *
- * CACHE_REMOVE_URL expects cache request rec within its context because the
- * request this filter runs on can be different from the one whose cache entry
- * should be removed, due to internal redirects.
- *
- * Note that CACHE_SAVE_URL (as a content-set filter, hence run before the
- * protocol filters) will remove this filter if it decides to cache the file.
- * Therefore, if this filter is left in, it must mean we need to toss any
- * existing files.
- */
-int cache_remove_url_filter(ap_filter_t *f, apr_bucket_brigade *in)
-{
-    request_rec *r = f->r;
-    cache_request_rec *cache;
-
-    /* Setup cache_request_rec */
-    cache = (cache_request_rec *) f->ctx;
-
-    if (!cache) {
-        /* user likely configured CACHE_REMOVE_URL manually; they should really
-         * use mod_cache configuration to do that. So:
-         * 1. Remove ourselves
-         * 2. Do nothing and bail out
-         */
-        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
-                     "cache: CACHE_REMOVE_URL enabled unexpectedly");
-        ap_remove_output_filter(f);
-        return ap_pass_brigade(f->next, in);
-    }
-    /* Now remove this cache entry from the cache */
-    cache_remove_url(cache, r->pool);
-
-    /* remove ourselves */
-    ap_remove_output_filter(f);
     return ap_pass_brigade(f->next, in);
 }
 
