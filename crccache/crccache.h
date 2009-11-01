@@ -20,7 +20,7 @@
 #define MIN(a,b)                ((a) < (b) ? (a) : (b))
 #endif
 
-const char * CRCCACHE_ENCODING = "crcsync";
+#define CRCCACHE_ENCODING "crcsync"
 const char * ENCODING_HEADER = "Content-Encoding";
 const char * BLOCK_HEADER = "If-Block";
 const char * VARY_HEADER = "Vary";

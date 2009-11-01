@@ -36,6 +36,7 @@
 #include <apr-1.0/apr_base64.h>
 #include <apr-1.0/apr_lib.h>
 #include <apr-1.0/apr_date.h>
+#include <apr-1.0/apr_tables.h>
 #include "ap_provider.h"
 #include "util_filter.h"
 #include "util_script.h"
@@ -247,9 +248,40 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
-		// TODO: Remove crcsync from the content encoding header
-		// TODO: Remove If-block from the headers
-		// TODO: Fix up the etag as well
+
+		// remove the encoding header
+		apr_table_unset(r->headers_out, ENCODING_HEADER);
+
+		// remove If-Block from the Vary header
+		char * vary = apr_pstrdup(r->pool, apr_table_get(r->headers_out, "Vary"));
+		if (vary)
+		{
+			apr_table_unset(r->headers_out, "Vary");
+			char * tok;
+			char * last = NULL;
+			for (tok = apr_strtok(vary,", ",&last);tok != NULL;tok = apr_strtok(NULL,", ",&last))
+			{
+				if (strcmp(BLOCK_HEADER,tok)!=0)
+				{
+					apr_table_mergen(r->headers_out,"Vary",tok);
+				}
+			}
+		}
+
+		// fix up etag
+		char * etag = apr_pstrdup(r->pool, apr_table_get(r->headers_out, "etag"));
+		if (vary)
+		{
+			int etaglen = strlen(etag);
+			if (etaglen>strlen(CRCCACHE_ENCODING) + 1)
+			{
+				if (strcmp("-"CRCCACHE_ENCODING,&etag[etaglen-(strlen(CRCCACHE_ENCODING) + 1)])==0)
+				{
+					etag[etaglen-(strlen(CRCCACHE_ENCODING) + 1)] = '\0';
+					apr_table_setn(r->headers_out,"etag",etag);
+				}
+			}
+		}
 	}
 
 

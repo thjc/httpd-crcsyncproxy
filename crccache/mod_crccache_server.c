@@ -215,7 +215,6 @@ static int crccache_server_header_parser_handler(request_rec *r) {
  * implement his suggestion.  It fixes the bug, or at least turns it
  * from a showstopper to an inefficiency.  And it breaks nothing that
  * wasn't already broken.
- * TODO: the crccache_client should undo this once the reconstructed page has been saved in the cache
  */
 static void crccache_check_etag(request_rec *r, const char *transform) {
 	const char *etag = apr_table_get(r->headers_out, "ETag");
