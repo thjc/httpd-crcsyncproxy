@@ -2,7 +2,7 @@ The module should work with a standard SuSE 11.1 apache install, if you follow b
 
 1) load modules:
 Add following values to parameter APACHE_MODULES in /etc/sysconfig/apache2:
- proxy proxy_http cache deflate /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_client.so /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_server.so
+ proxy proxy_http deflate /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_client.so /home/awulms/Ontwikkel/olpc/httpd-crcsyncproxy/crccache/mod_crccache_server.so
 
 
 2) set-up virtual hosts:

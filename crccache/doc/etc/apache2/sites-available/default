@@ -1,7 +1,16 @@
 ServerName localhost
 <VirtualHost *:8080>
+	# Enable crccache_client
 	CRCClientEnable /
-        # This path must be the same as the one in /etc/default/apache2
+
+	# cache cleaning is done by htcacheclean, which can be configured in
+	# /etc/default/apache2
+	#
+	# For further information, see the comments in that file, 
+	# /usr/share/doc/apache2.2-common/README.Debian, and the htcacheclean(8)
+	# man page.
+	# Please note that htcacheclean also cleans cache of classical
+	# cache module, so it must clean both cache roots.
         CacheRootClient /var/cache/apache2/mod_crccache_client
 
         CacheDirLevelsClient 5
@@ -11,6 +20,14 @@ ServerName localhost
 	# is removed from the content before it is stored
 	# in the cache. Otherwise, crccache won't have a good
 	# basis for the crcsync based delta handling
+	# TODO: revise this; the proxy should provide the compressed
+	#       date to the downstream client but store it non-compressed
+	#       in the cache. How can this be achieved? Can it be done by
+	#	invoking INFLATE filter, then crccache filter, then DEFLATE
+	#       filter? I assume it will achieve the right effect but it can
+	#       hardly be called efficient... And how about the etag. Will it
+	#       survive intact? Can we guarantee that DEFLATE filter will use
+	#       same compression parameters as the origin server used?
 	SetOutputFilter INFLATE
 
     ErrorLog /var/log/apache2/crccache_client.log
