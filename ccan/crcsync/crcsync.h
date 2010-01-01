@@ -2,6 +2,7 @@
 #define CCAN_CRCSYNC_H
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 /**
  * crc_of_blocks - calculate the crc of the blocks.
@@ -15,7 +16,7 @@
  * @crc array.
  */
 void crc_of_blocks(const void *data, size_t len, unsigned int blocksize,
-		   unsigned int crcbits, uint64_t crc[]);
+		   unsigned int crcbits, bool merge_trailing_bytes_in_last_block, uint64_t crc[]);
 
 /**
  * crc_context_new - allocate and initialize state for crc_find_block
@@ -58,6 +59,16 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
  * simply flush the final data.  Keep calling it until it returns 0.
  */
 long crc_read_flush(struct crc_context *ctx);
+
+/**
+ * reset_running_crcs - reset the running CRC numbers in the context
+ * @ctx: the context passed to crc_read_block
+ * 
+ * Resets the running CRC numbers. Can be used after a crc_read_flush
+ * to re-use the context for another data-set with exactly same input
+ * parameters (e.g. the list of checksums and the normal and tail block sizes)
+ */
+void crc_reset_running_crcs(struct crc_context *ctx);
 
 /**
  * crc_context_free - free a context returned from crc_context_new.

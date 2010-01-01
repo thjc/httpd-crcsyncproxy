@@ -31,12 +31,12 @@
 
 #include <assert.h>
 
-#include <apr-1.0/apr_file_io.h>
-#include <apr-1.0/apr_strings.h>
-#include <apr-1.0/apr_base64.h>
-#include <apr-1.0/apr_lib.h>
-#include <apr-1.0/apr_date.h>
-#include <apr-1.0/apr_tables.h>
+#include <apr_file_io.h>
+#include <apr_strings.h>
+#include <apr_base64.h>
+#include <apr_lib.h>
+#include <apr_date.h>
+#include <apr_tables.h>
 #include "ap_provider.h"
 #include "util_filter.h"
 #include "util_script.h"
@@ -130,15 +130,13 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 
 	// this will be rounded down, but thats okay
-	// TODO: I think that we should just add %  to the trailing block, otherwise our extra block
-	// is always limited to max of BLOCK_COUNT size.
 	size_t blocksize = len/FULL_BLOCK_COUNT;
 	size_t tail_block_size = blocksize + len % FULL_BLOCK_COUNT;
 	size_t block_count_including_final_block = FULL_BLOCK_COUNT;// + (tail_block_size != 0);
 	// sanity check for very small files
 	if (blocksize> 4)
 	{
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: %d blocks of %ld bytes",FULL_BLOCK_COUNT,blocksize);
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: %d blocks of %ld bytes, one block of %ld bytes",FULL_BLOCK_COUNT-1,blocksize,tail_block_size);
 
 		crccache_client_ctx * ctx;
 		ctx = apr_pcalloc(r->pool, sizeof(*ctx));
@@ -175,11 +173,11 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		char hash_set[HASH_HEADER_SIZE+1];
 
 		uint64_t crcs[block_count_including_final_block];
-		//crc_of_blocks(data, len, blocksize, HASH_SIZE, crcs);
-		for (i = 0; i < FULL_BLOCK_COUNT - 1; i++) {
-			crcs[i] = crc64_iso(0, &data[i*blocksize], blocksize);
-		}
-		crcs[FULL_BLOCK_COUNT] = crc64_iso(0, &data[(FULL_BLOCK_COUNT-1)*blocksize], tail_block_size);
+		crc_of_blocks(data, len, blocksize, HASH_SIZE, true, crcs);
+//		for (i = 0; i < FULL_BLOCK_COUNT - 1; i++) {
+//			crcs[i] = crc64_iso(0, &data[i*blocksize], blocksize);
+//		}
+//		crcs[FULL_BLOCK_COUNT-1] = crc64_iso(0, &data[(FULL_BLOCK_COUNT-1)*blocksize], tail_block_size);
 
 		// swap to network byte order
 		for (i = 0; i < block_count_including_final_block;++i)
@@ -192,9 +190,9 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		//apr_bucket_delete(e);
 
 		// TODO; bit of a safety margin here, could calculate exact size
-		const int block_header_max_size = HASH_HEADER_SIZE+32;
+		const int block_header_max_size = HASH_HEADER_SIZE+40;
 		char block_header_txt[block_header_max_size];
-		snprintf(block_header_txt, block_header_max_size,"fs=%zu, h=%s",len,hash_set);
+		snprintf(block_header_txt, block_header_max_size,"v=1, fs=%zu, h=%s",len,hash_set);
 		apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
 		// TODO: do we want to cache the hashes here?
 
@@ -236,7 +234,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		ctx->headers_checked = 1;
 
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCSYNC retuned status code (%d)", r->status);
+				"CRCSYNC returned status code (%d)", r->status);
 
 		// TODO: make this work if we have multiple encodings
 		const char * content_encoding;
@@ -270,7 +268,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		// fix up etag
 		char * etag = apr_pstrdup(r->pool, apr_table_get(r->headers_out, "etag"));
-		if (vary)
+		if (etag)
 		{
 			int etaglen = strlen(etag);
 			if (etaglen>strlen(CRCCACHE_ENCODING) + 1)
@@ -411,7 +409,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					ctx->state = DECODING_NEW_SECTION;
 
 					// TODO: Output the indicated block here
-					size_t current_block_size = block_number < FULL_BLOCK_COUNT ? ctx->block_size : ctx->tail_block_size;
+					size_t current_block_size = block_number < FULL_BLOCK_COUNT-1 ? ctx->block_size : ctx->tail_block_size;
 					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
 							"CRCSYNC-DECODE block section, block %d, size %zu" ,block_number, current_block_size);
 
@@ -419,7 +417,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					const char * source_data;
 					size_t source_len;
 					apr_bucket_read(ctx->cached_bucket, &source_data, &source_len, APR_BLOCK_READ);
-					assert(block_number < (FULL_BLOCK_COUNT + (ctx->tail_block_size != 0)));
+					assert(block_number < (FULL_BLOCK_COUNT /*+ (ctx->tail_block_size != 0)*/));
 					memcpy(buf,&source_data[block_number*ctx->block_size],current_block_size);
 					// update our sha1 hash
 					EVP_DigestUpdate(&ctx->mdctx, buf, current_block_size);
@@ -1137,6 +1135,11 @@ static void crccache_client_register_hook(apr_pool_t *p) {
      * CACHE_SAVE must go into the filter chain after a possible DEFLATE
      * filter to ensure that the compressed content is stored.
      * Incrementing filter type by 1 ensures his happens.
+     * TODO: Revise this logic. In order for the crccache to work properly, 
+     *        the plain text content must be cached and not the deflated content
+     *        Even more so, when receiving compressed content from the upstream
+     *        server, the cache_save_filter handler should uncompress it before
+     *        storing in the cache (but provide the compressed data to the client)
      */
     cache_save_filter_handle =
         ap_register_output_filter("CACHE_SAVE",

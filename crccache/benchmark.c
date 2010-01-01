@@ -11,6 +11,10 @@
 #include "zlib.h"
 #include <crcsync/crcsync.h>
 
+#define FULL_BLOCK_COUNT 40
+const int HASH_SIZE = 64;
+const int TEST_ITERATIONS_COUNT = 100;
+
 void error(char *msg)
 {
 	printf("Error code: %d, msg: %s", errno, msg);
@@ -84,18 +88,14 @@ data_t *read_file_to_data(char *fname)
 	return data;
 }
 
-#define FULL_BLOCK_COUNT 40
-const int HASH_SIZE = 64;
-const int TEST_ITERATIONS_COUNT = 100;
 
-
-void crcvalidate_data(data_t *data, size_t block_size, uint64_t *hashes, size_t block_count_including_final_block, size_t tail_block_size)
+void crcvalidate_data(data_t *data, struct crc_context *crcctx)
 {
-	struct crc_context *crcctx = crc_context_new(block_size, HASH_SIZE, hashes, block_count_including_final_block, tail_block_size);
 
 	long rd_block_rslt;
 	unsigned char *getpos = data->buf;
 	ssize_t remaining = data->datasize;
+	// printf("rslts: ");
 	while (remaining != 0)
 	{
 		size_t ndigested = crc_read_block(crcctx, &rd_block_rslt, getpos, remaining);
@@ -103,10 +103,10 @@ void crcvalidate_data(data_t *data, size_t block_size, uint64_t *hashes, size_t 
 		getpos += ndigested;
 		remaining -= ndigested;
 	}
+	rd_block_rslt = crc_read_flush(crcctx);
+	// printf("%ld ", rd_block_rslt);
 	// printf("\n");
-	
-	// Don't bother to flush the last block, simply free everything
-	crc_context_free(crcctx);
+	crc_reset_running_crcs(crcctx);	
 }
 
 void sha256_data(data_t *data)
@@ -213,6 +213,9 @@ int main(int argc, char *argv[])
 {
 	int cnt;
 
+	int merge_trailing_blocks_in_last_block;
+	for (merge_trailing_blocks_in_last_block = 0; merge_trailing_blocks_in_last_block != 2; merge_trailing_blocks_in_last_block++)
+	{
 	// Load the data
 	data_t *original_data = read_file_to_data(argv[1]);
 	printf("Original data size: %zu\n", original_data->datasize);
@@ -233,10 +236,15 @@ int main(int argc, char *argv[])
 	bm_compress.end = clock();
 	printf("Compressed data size: %zu\n", compressed_data->datasize);
 
+	
 	// Parameters for the hashes
 	size_t block_size = original_data->datasize/FULL_BLOCK_COUNT;
 	size_t tail_block_size = original_data->datasize%FULL_BLOCK_COUNT;
-	size_t block_count_including_final_block = FULL_BLOCK_COUNT + (tail_block_size != 0);
+	if (merge_trailing_blocks_in_last_block)
+	{
+		tail_block_size += block_size;
+	}
+	size_t block_count_including_final_block = FULL_BLOCK_COUNT + (tail_block_size != 0 && !merge_trailing_blocks_in_last_block);
 
 	// Set-up hashes for a perfect match and benchmark how long it takes
 	uint64_t match_hashes[block_count_including_final_block];
@@ -244,7 +252,7 @@ int main(int argc, char *argv[])
 	bm_crccalculate.start = clock();
 	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
 	{
-		crc_of_blocks(original_data->buf, original_data->datasize, block_size, HASH_SIZE, match_hashes);
+		crc_of_blocks(original_data->buf, original_data->datasize, block_size, HASH_SIZE, merge_trailing_blocks_in_last_block, match_hashes);
 	}
 	bm_crccalculate.end = clock();
 	
@@ -259,7 +267,7 @@ int main(int argc, char *argv[])
 		{
 			memcpy(reconstructed_buf+blocks_cnt*block_size, (original_data->buf)+blocks_cnt*block_size, block_size);
 		}
-		if (tail_block_size != 0)
+		if (tail_block_size != 0 && !merge_trailing_blocks_in_last_block)
 		{
 			memcpy(reconstructed_buf+blocks_cnt*block_size, (original_data->buf)+blocks_cnt*block_size, tail_block_size);
 		}
@@ -278,21 +286,33 @@ int main(int argc, char *argv[])
 		nomatch_hashes[cnt] = value;
 	}
 	
+	struct crc_context *crcctx;
+	benchmark_t bm_crc_context_new;
+	bm_crc_context_new.start = clock();
+	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
+	{
+		crcctx = crc_context_new(block_size, HASH_SIZE, match_hashes, block_count_including_final_block, tail_block_size);
+	}
+	bm_crc_context_new.end = clock();
+	
 	benchmark_t bm_crcvalidate_match;
 	bm_crcvalidate_match.start = clock();
 	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
 	{
-		crcvalidate_data(original_data, block_size, match_hashes, block_count_including_final_block, tail_block_size);
+		crcvalidate_data(original_data, crcctx);
 	}
 	bm_crcvalidate_match.end = clock();
 
+	crcctx = crc_context_new(block_size, HASH_SIZE, nomatch_hashes, block_count_including_final_block, tail_block_size);
 	benchmark_t bm_crcvalidate_nomatch;
 	bm_crcvalidate_nomatch.start = clock();
 	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
 	{
-		crcvalidate_data(original_data, block_size, nomatch_hashes, block_count_including_final_block, tail_block_size);
+		crcvalidate_data(original_data, crcctx);
 	}
 	bm_crcvalidate_nomatch.end = clock();
+
+	crc_context_free(crcctx);
 
 	benchmark_t bm_sha256;
 	bm_sha256.start = clock();
@@ -312,16 +332,27 @@ int main(int argc, char *argv[])
 	printf("Original data size after decompression: %zd\n", original_data->datasize);
 	
 	printf(
-			"Compress: %.4f ms, Decompress: %.4f ms, Copy blocks: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms, SHA256: %.4f ms\n", 
+			"Nblocks: %zd, Block size: %zd, Tail block size: %zd, Compress: %.4f ms, Decompress: %.4f ms, Copy blocks: %.4f ms, New CRCCTX: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms, SHA256: %.4f ms\n", 
+			block_count_including_final_block, block_size, tail_block_size,
 			duration_ms(&bm_compress)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_decompress)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_reconstruct)/TEST_ITERATIONS_COUNT,
+			duration_ms(&bm_crc_context_new)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_crccalculate)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_crcvalidate_match)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_crcvalidate_nomatch)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_sha256)/TEST_ITERATIONS_COUNT
 			);
+//	printf(
+//			"Nblocks: %zd, Block size: %zd, Tail block size: %zd, New CRCCTX: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms\n", 
+//			block_count_including_final_block, block_size, tail_block_size,
+//			duration_ms(&bm_crc_context_new)/TEST_ITERATIONS_COUNT,
+//			duration_ms(&bm_crccalculate)/TEST_ITERATIONS_COUNT,
+//			duration_ms(&bm_crcvalidate_match)/TEST_ITERATIONS_COUNT,
+//			duration_ms(&bm_crcvalidate_nomatch)/TEST_ITERATIONS_COUNT
+//			);
 
 	free_data(original_data);
+	}
 	return 0;
 }

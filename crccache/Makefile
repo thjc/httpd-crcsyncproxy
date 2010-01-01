@@ -10,7 +10,7 @@ CFLAGS=`apr-config --cflags --includes` $(EXTRA_FLAGS)
 CXXFLAGS=`apr-config --cppflags --includes` $(EXTRA_FLAGS)
 LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz -lcrypto
 
-all: mod_crccache_client.so mod_crccache_server.so benchmark
+all: mod_crccache_client.so mod_crccache_server.so benchmark test_hash_small_invokations
 
 CACHE_SRC=cache/cache.o cache/cache_cache.o \
 cache/cache_hash.o cache/cache_pqueue.o \
@@ -33,4 +33,10 @@ clean:
 
 benchmark: benchmark.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
 	gcc $^ -o $@ -lgcrypt -lgpg-error -lz
+
+test_hash_small_invokations: test_hash_small_invokations.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
+	gcc $^ -o $@
+
+restart:
+	sudo /etc/init.d/apache2 restart
  

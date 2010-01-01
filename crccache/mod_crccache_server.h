@@ -1,5 +1,5 @@
 /*
- * crccache.h
+ * mod_crccache_server.h
  *
  *  Created on: 15/03/2009
  *      Author: awulms

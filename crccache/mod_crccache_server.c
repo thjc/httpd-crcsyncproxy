@@ -28,9 +28,9 @@
 
 #include <stdbool.h>
 
-#include <apr-1.0/apr_file_io.h>
-#include <apr-1.0/apr_strings.h>
-#include <apr-1.0/apr_base64.h>
+#include <apr_file_io.h>
+#include <apr_strings.h>
+#include <apr_base64.h>
 
 #include "ap_provider.h"
 
@@ -116,9 +116,10 @@ int decode_if_block_header(const char * header, int * version, size_t * file_siz
 	*hashes = NULL; // this will be allocated below, make sure we free it
 	int start = 0;
 	int ii;
-	for (ii = 0; ii < strlen(header);++ii)
+	size_t headerlen = strlen(header);
+	for (ii = 0; ii < headerlen;++ii)
 	{
-		if (header[ii] == ',' || ii == strlen(header)-1)
+		if (header[ii] == ',' || ii == headerlen-1)
 		{
 			sscanf(&header[start]," v=%d",version);
 			sscanf(&header[start]," h=%as",hashes);
@@ -170,6 +171,8 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
 			free (hashes);
 			hashes = NULL;
+			// TODO: save etag and content-encoding headers before INFLATE modifies them, for later reuse in this module itself
+			//        (to construct etag-crcsync-<original-encoding> header) (is it possible to pass info from here to the main module?)
 			// Insert mod_deflate's INFLATE filter in the chain to unzip content
 			// so that there is clear text available for the delta algorithm
 			ap_filter_t *inflate_filter = ap_add_output_filter("INFLATE", NULL, r, r->connection);
@@ -186,6 +189,11 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 					NULL, r, r->connection);
 
 		}
+		else
+		{
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Did not detect blockheader (%s)", BLOCK_HEADER);
+		}
+			
 /*		// All is okay, so set response header to IM Used
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Setting 226 header");
 		r->status=226;
@@ -207,14 +215,7 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 	return 226;
 }*/
 
-/* PR 39727: we're screwing up our clients if we leave a strong ETag
- * header while transforming content.  Henrik Nordstrom suggests
- * appending ";gzip".
- *
- * Pending a more thorough review of our Etag handling, let's just
- * implement his suggestion.  It fixes the bug, or at least turns it
- * from a showstopper to an inefficiency.  And it breaks nothing that
- * wasn't already broken.
+/* TODO: change etag as per document (e.g. append '-crcsync-<original-encoding>' to the etag header)
  */
 static void crccache_check_etag(request_rec *r, const char *transform) {
 	const char *etag = apr_table_get(r->headers_out, "ETag");
@@ -328,7 +329,7 @@ static apr_status_t write_literal(ap_filter_t *f, unsigned char *buffer, long co
 }
 
 /**
- * Write literal data
+ * Write hash
  */
 static apr_status_t write_hash(ap_filter_t *f, unsigned char *buffer, long count)
 {
@@ -433,7 +434,7 @@ static apr_status_t process_block(ap_filter_t *f)
 	{
 		rslt = write_block_reference(f, rd_block_rslt);
 		unsigned char blocknum = (unsigned char) ((-rd_block_rslt)-1);
-		ctx->buffer_read_getpos += (blocknum == ctx->block_count) ? ctx->tail_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == ctx->block_count-1) ? ctx->tail_block_size : ctx->block_size;
 	}
 
 	// Update the context with the results
@@ -476,7 +477,7 @@ static apr_status_t flush_block(ap_filter_t *f)
 	{
 		rslt = write_block_reference(f, rd_flush_rslt);
 		unsigned char blocknum = (unsigned char) ((-rd_flush_rslt)-1);
-		ctx->buffer_read_getpos += (blocknum == ctx->block_count) ? ctx->tail_block_size : ctx->block_size;
+		ctx->buffer_read_getpos += (blocknum == ctx->block_count-1) ? ctx->tail_block_size : ctx->block_size;
 	}
 
 	// Update the context with the results
