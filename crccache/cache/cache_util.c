@@ -19,11 +19,11 @@
 #include "mod_crccache_client.h"
 #include <http_log.h>
 #include <http_protocol.h>
-#include <apr-1.0/apr_date.h>
-#include <apr-1.0/apr_time.h>
-#include <apr-1.0/apr_md5.h>
-#include <apr-1.0/apr_lib.h>
-#include <apr-1.0/apr_strings.h>
+#include <apr_date.h>
+#include <apr_time.h>
+#include <apr_md5.h>
+#include <apr_lib.h>
+#include <apr_strings.h>
 
 /* Determine if "url" matches the hostname, scheme and port and path
  * in "filter". All but the path comparisons are case-insensitive.

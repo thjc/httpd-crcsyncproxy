@@ -1,5 +1,5 @@
 /*
- * crccache.h
+ * mod_crccache_client.h
  *
  *  Created on: 15/03/2009
  *      Author: awulms
@@ -13,7 +13,7 @@
 #include <openssl/evp.h>
 #include <ap_config.h>
 #include <http_config.h>
-#include <apr-1.0/apr_optional.h>
+#include <apr_optional.h>
 
 extern module AP_MODULE_DECLARE_DATA crccache_client_module;
 

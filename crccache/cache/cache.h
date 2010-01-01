@@ -8,11 +8,11 @@
 #ifndef CACHE_H_
 #define CACHE_H_
 
-#include <apr-1.0/apr_time.h>
-#include <apr-1.0/apr_tables.h>
-#include <apr-1.0/apr_file_info.h>
-#include <apr-1.0/apr_file_io.h>
-#include <apr-1.0/apr_buckets.h>
+#include <apr_time.h>
+#include <apr_tables.h>
+#include <apr_file_info.h>
+#include <apr_file_io.h>
+#include <apr_buckets.h>
 
 #include <util_filter.h>
 #include <httpd.h>

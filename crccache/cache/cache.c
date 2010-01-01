@@ -8,11 +8,11 @@
 #include <cache/cache.h>
 #include <mod_crccache_client.h>
 
-#include <apr-1.0/apr_file_io.h>
-#include <apr-1.0/apr_strings.h>
-#include <apr-1.0/apr_base64.h>
-#include <apr-1.0/apr_lib.h>
-#include <apr-1.0/apr_date.h>
+#include <apr_file_io.h>
+#include <apr_strings.h>
+#include <apr_base64.h>
+#include <apr_lib.h>
+#include <apr_date.h>
 
 #include <http_log.h>
 #include <http_protocol.h>

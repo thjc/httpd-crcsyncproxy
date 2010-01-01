@@ -23,9 +23,9 @@
 #include <http_core.h>
 #include <httpd.h>
 
-#include <apr-1.0/apr_date.h>
-#include <apr-1.0/apr_lib.h>
-#include <apr-1.0/apr_strings.h>
+#include <apr_date.h>
+#include <apr_lib.h>
+#include <apr_strings.h>
 
 static int set_cookie_doo_doo(void *v, const char *key, const char *val)
 {
