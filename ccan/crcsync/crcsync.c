@@ -35,7 +35,13 @@ struct crc_hash_record {
 	int value;
 };
 
+struct crc_hash_table {
+	unsigned mask;
+	struct crc_hash_record *records;
+};
+
 struct crc_context {
+	const uint64_t *crc64_iso_tab;
 	size_t normal_block_size;
 	size_t tail_block_size;
 	size_t max_block_size;
@@ -61,8 +67,7 @@ struct crc_context {
 	uint64_t tail_crc;
 	/* This doesn't count the last CRC. */
 	unsigned int num_crcs;
-	unsigned crc_hashtable_size;
-	struct crc_hash_record *crc_hashtable;
+	struct crc_hash_table crcs;
 };
 
 static uint64_t crc64_over_zeros(const uint64_t *crc64_iso_tab, uint64_t crc, int size)
@@ -76,9 +81,8 @@ static uint64_t crc64_over_zeros(const uint64_t *crc64_iso_tab, uint64_t crc, in
 
 /* Initialize one table that is used to calculate how the crc changes when we take a give
  * char out of the crc'd area. This function is to be used when there is no tail block */
-static void init_uncrc_tab(uint64_t uncrc_tab[], unsigned int wsize)
+static void init_uncrc_tab(const uint64_t *crc64_iso_tab, uint64_t uncrc_tab[], unsigned int wsize)
 {
-	const uint64_t *crc64_iso_tab = crc64_iso_table();
 	unsigned int i;
 	uint64_t part_crc;
 
@@ -91,9 +95,8 @@ static void init_uncrc_tab(uint64_t uncrc_tab[], unsigned int wsize)
  * char out of the crc'd area. This function is to be used when there is a tail block.
  * The function initializes one table for the tail block and another one for the normal block.
  * You must pass the params for the smalles block first followed by the params for the largest block */
-static void init_uncrc_tabs(uint64_t small_uncrc_tab[], unsigned int small_wsize, uint64_t large_uncrc_tab[], unsigned int large_wsize)
+static void init_uncrc_tabs(const uint64_t *crc64_iso_tab, uint64_t small_uncrc_tab[], unsigned int small_wsize, uint64_t large_uncrc_tab[], unsigned int large_wsize)
 {
-	const uint64_t *crc64_iso_tab = crc64_iso_table();
 	unsigned int i;
 	unsigned int delta_wsize = large_wsize - small_wsize;
 	uint64_t small_part_crc;
@@ -110,32 +113,33 @@ static void init_uncrc_tabs(uint64_t small_uncrc_tab[], unsigned int small_wsize
 	}
 }
 
-static void crc_hashtable_put(struct crc_hash_record *crc_hashtable, unsigned hash_tmask, uint64_t crc, int value)
+static unsigned crc_hashtable_getpos(const struct crc_hash_table *crcs, uint64_t crc)
 {
-	unsigned pos = (crc >> 32) & hash_tmask; // Use highest 32 bits of the checksum as start position
+	unsigned mask = crcs->mask;
+	struct crc_hash_record *records = crcs->records;
+	unsigned pos = (crc >> 32) & mask; // Use highest 32 bits of the checksum as start position
 	unsigned step = (1 + (crc & 0x1e)); // Step with an odd-number of steps, exact value depends on crc lowest 5 bits
 	
-	while (crc_hashtable[pos].value != -1 && crc_hashtable[pos].crc != crc)
+	while (records[pos].value != -1 && records[pos].crc != crc)
 	{
 		// This position is already taken by another crc record. Go to next position
-		pos = (pos + step) & hash_tmask;
+		pos = (pos + step) & mask;
 	}
-	crc_hashtable[pos].value = value;
-	crc_hashtable[pos].crc = crc;
+	return pos;
 }
 
-static int crc_hashtable_get(const struct crc_hash_record crc_hashtable[], unsigned hash_tmask, uint64_t crc)
+static void crc_hashtable_put(struct crc_hash_table *crcs, uint64_t crc, int value)
 {
-	unsigned pos = (crc >> 32) & hash_tmask;
-	unsigned step = (1 + (crc & 0x1e));
-	
-	while (crc_hashtable[pos].value != -1 && crc_hashtable[pos].crc != crc)
-	{
-		// This position is taken by another CRC record. Go to next position
-		pos = (pos + step) & hash_tmask;
-	}
+	unsigned pos = crc_hashtable_getpos(crcs, crc);
+	crcs->records[pos].value = value;
+	crcs->records[pos].crc = crc;
+}
+
+static int crc_hashtable_get(const struct crc_hash_table *crcs, uint64_t crc)
+{
+	unsigned pos = crc_hashtable_getpos(crcs, crc);
 	// Found an empty position (with value -1) or found the entry for the requested CRC
-	return crc_hashtable[pos].value;
+	return crcs->records[pos].value;
 }
 
 struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
@@ -150,6 +154,7 @@ struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
 
 	ctx = malloc(sizeof(*ctx) + sizeof(crc[0])*num_crcs);
 	if (ctx) {
+		ctx->crc64_iso_tab = crc64_iso_table();
 		ctx->normal_block_size = normal_block_size;
 		if (tail_block_size == normal_block_size)
 		{
@@ -163,20 +168,21 @@ struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
 
 		ctx->crcmask = mask_of(crcbits);
 		ctx->num_crcs = num_crcs;
-		ctx->crc_hashtable_size = 4;
-		while (ctx->crc_hashtable_size < 2*num_crcs)
+		unsigned crc_hashtable_size = 4;
+		while (crc_hashtable_size < 2*num_crcs)
 		{
-			ctx->crc_hashtable_size <<= 1;
+			crc_hashtable_size <<= 1;
 		}
-		ctx->crc_hashtable = malloc(sizeof(struct crc_hash_record)*ctx->crc_hashtable_size);
+		ctx->crcs.mask = crc_hashtable_size-1;
+		ctx->crcs.records = malloc(sizeof(struct crc_hash_record)*crc_hashtable_size);
 		unsigned cnt;
-		for (cnt=0; cnt != ctx->crc_hashtable_size; cnt++)
+		for (cnt=0; cnt != crc_hashtable_size; cnt++)
 		{
-			ctx->crc_hashtable[cnt].value = -1;
+			ctx->crcs.records[cnt].value = -1;
 		}
 		for (cnt=0; cnt != num_crcs; cnt++)
 		{
-			crc_hashtable_put(ctx->crc_hashtable, ctx->crc_hashtable_size-1, crc[cnt], cnt);
+			crc_hashtable_put(&ctx->crcs, crc[cnt], cnt);
 		}
 		// memcpy(ctx->crc, crc, sizeof(crc[0])*num_crcs);
 		ctx->running_normal_crc = 0;
@@ -186,13 +192,13 @@ struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
 		if (tail_block_size)
 		{
 			if (tail_block_size < normal_block_size)
-				init_uncrc_tabs(ctx->tail_uncrc_tab, tail_block_size, ctx->normal_uncrc_tab, normal_block_size);
+				init_uncrc_tabs(ctx->crc64_iso_tab, ctx->tail_uncrc_tab, tail_block_size, ctx->normal_uncrc_tab, normal_block_size);
 			else
-				init_uncrc_tabs(ctx->normal_uncrc_tab, normal_block_size, ctx->tail_uncrc_tab, tail_block_size);
+				init_uncrc_tabs(ctx->crc64_iso_tab, ctx->normal_uncrc_tab, normal_block_size, ctx->tail_uncrc_tab, tail_block_size);
 		}
 		else
 		{
-			init_uncrc_tab(ctx->normal_uncrc_tab, normal_block_size);
+			init_uncrc_tab(ctx->crc64_iso_tab, ctx->normal_uncrc_tab, normal_block_size);
 		}
 		
 		ctx->buffer = malloc(ctx->max_block_size);
@@ -212,7 +218,7 @@ struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
 /* Only invoke once you have read enough literal bytes! */
 static int crc_matches(const struct crc_context *ctx)
 {
-	return crc_hashtable_get(ctx->crc_hashtable,ctx->crc_hashtable_size-1, ctx->running_normal_crc & ctx->crcmask);
+	return crc_hashtable_get(&ctx->crcs, ctx->running_normal_crc & ctx->crcmask);
 }
 
 /* Return -1 or index of tail crc */
@@ -222,9 +228,9 @@ static int tail_matches(const struct crc_context *ctx)
 	return (ctx->running_tail_crc & ctx->crcmask) == ctx->tail_crc ? ctx->num_crcs : -1;
 }
 
-static uint64_t crc_add_byte(uint64_t crc, uint8_t newbyte)
+static uint64_t crc_add_byte(const uint64_t *crc64_iso_tab, uint64_t crc, uint8_t newbyte)
 {
-	return crc64_iso(crc, &newbyte, 1);
+	return crc64_iso_tab[(crc ^ newbyte) & 0xFFL] ^ (crc >> 8);
 }
 
 static uint64_t crc_remove_byte(uint64_t crc, uint8_t oldbyte,
@@ -233,13 +239,14 @@ static uint64_t crc_remove_byte(uint64_t crc, uint8_t oldbyte,
 	return crc ^ uncrc_tab[oldbyte];
 }
 
-static uint64_t crc_roll(uint64_t crc, uint8_t oldbyte, uint8_t newbyte,
+static uint64_t crc_roll(const uint64_t *crc64_iso_tab, uint64_t crc, uint8_t oldbyte, uint8_t newbyte,
 			 const uint64_t uncrc_tab[])
 {
-	return crc_add_byte(crc_remove_byte(crc, oldbyte, uncrc_tab), newbyte);
+	return crc_add_byte(crc64_iso_tab, crc_remove_byte(crc, oldbyte, uncrc_tab), newbyte);
 }
 
 enum RB_PHASE { non_rolling, only_tail_rolling, only_normal_rolling, both_rolling };
+#define MIN(X,Y) ((X) < (Y) ? (X) : (Y))
 
 size_t crc_read_block(struct crc_context *ctx, long *result,
 		      const void *buf, size_t buflen)
@@ -282,12 +289,12 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 		switch (phase)
 		{
 		case non_rolling:
-			while (consumed != buflen)
 			{
-				consumed++;
-				ctx->literal_bytes++;
-				ctx->running_tail_crc = ctx->running_normal_crc =
-				  crc_add_byte(ctx->running_normal_crc, *get_pos++);
+				size_t nbytes = MIN(buflen - consumed, MIN(ctx->normal_block_size - ctx->literal_bytes, ctx->tail_block_size - ctx->literal_bytes));
+				ctx->running_tail_crc = ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+				consumed += nbytes;
+				ctx->literal_bytes += nbytes;
+				get_pos += nbytes;
 				if (ctx->literal_bytes == ctx->normal_block_size) {
 					/* Reached the end of a normal block. Check CRC
 					   and start rolling the CRC at next iteration */
@@ -295,16 +302,14 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 						break;
 					normal_old = (ctx->buffer_size != 0) ? ctx->buffer : buf;
 					phase = only_normal_rolling;
-					break;
 				}
-				if (ctx->literal_bytes == ctx->tail_block_size) {
+				else if (ctx->literal_bytes == ctx->tail_block_size) {
 					/* Reached the end of a tail block. Check tail CRC
 					   and start rolling the CRC at next iteration */
 					if ((crcmatch = tail_matches(ctx)) != -1)
 						break;
 					tail_old = (ctx->buffer_size != 0) ? ctx->buffer : buf;
 					phase = only_tail_rolling;
-					break;
 				}
 			}
 			break;
@@ -313,7 +318,8 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 			{
 				consumed++;
 				ctx->literal_bytes++;
-				ctx->running_normal_crc = crc_roll(ctx->running_normal_crc,
+				ctx->running_normal_crc = crc_roll(ctx->crc64_iso_tab,
+								ctx->running_normal_crc,
 							    *normal_old, *get_pos,
 							    ctx->normal_uncrc_tab);
 				if ((crcmatch = crc_matches(ctx)) != -1)
@@ -322,7 +328,7 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 				if (++normal_old == ctx->buffer_end)
 					normal_old = buf;
 				if (ctx->tail_block_size) {
-					ctx->running_tail_crc = crc_add_byte(ctx->running_tail_crc, *get_pos++);
+					ctx->running_tail_crc = crc_add_byte(ctx->crc64_iso_tab, ctx->running_tail_crc, *get_pos++);
 					if (ctx->literal_bytes == ctx->tail_block_size)
 					{
 						if ((crcmatch = tail_matches(ctx)) != -1)
@@ -341,7 +347,8 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 			{
 				consumed++;
 				ctx->literal_bytes++;
-				ctx->running_tail_crc = crc_roll(ctx->running_tail_crc,
+				ctx->running_tail_crc = crc_roll(ctx->crc64_iso_tab,
+								ctx->running_tail_crc,
 							    *tail_old, *get_pos,
 							    ctx->tail_uncrc_tab);
 				if ((crcmatch = tail_matches(ctx)) != -1)
@@ -349,7 +356,7 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 				/* Advance trailing pointer for tail CRC */
 				if (++tail_old == ctx->buffer_end)
 					tail_old = buf;
-				ctx->running_normal_crc = crc_add_byte(ctx->running_normal_crc, *get_pos++);
+				ctx->running_normal_crc = crc_add_byte(ctx->crc64_iso_tab, ctx->running_normal_crc, *get_pos++);
 				if (ctx->literal_bytes == ctx->normal_block_size)
 				{
 					if ((crcmatch = crc_matches(ctx)) != -1)
@@ -364,7 +371,8 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 			while (consumed != buflen)
 			{
 				consumed++;
-				ctx->running_normal_crc = crc_roll(ctx->running_normal_crc,
+				ctx->running_normal_crc = crc_roll(ctx->crc64_iso_tab,
+								ctx->running_normal_crc,
 							    *normal_old, *get_pos,
 							    ctx->normal_uncrc_tab);
 				if ((crcmatch = crc_matches(ctx)) != -1)
@@ -372,7 +380,8 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 				/* Advance trailing pointer for normal CRC */
 				if (++normal_old == ctx->buffer_end)
 					normal_old = buf;
-				ctx->running_tail_crc = crc_roll(ctx->running_tail_crc,
+				ctx->running_tail_crc = crc_roll(ctx->crc64_iso_tab,
+								ctx->running_tail_crc,
 							    *tail_old, *get_pos,
 							    ctx->tail_uncrc_tab);
 				if ((crcmatch = tail_matches(ctx)) != -1)
