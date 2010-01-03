@@ -58,14 +58,20 @@ typedef enum  {
 	COMPRESSION_ENDED
 } compression_state_t;
 
-//#define MIN(X,Y) (X<Y?X:Y)
-
 static void *crccache_server_create_config(apr_pool_t *p, server_rec *s) {
 	crccache_server_conf *conf = apr_pcalloc(p, sizeof(crccache_server_conf));
+	conf->enabled = 0;
+	conf->decoder_modules = NULL;
+	conf->decoder_modules_cnt = 0;
 	return conf;
 }
 
+typedef enum { GS_INIT, GS_HEADERS_SAVED, GS_ENCODING } global_state_t;
+
 typedef struct crccache_ctx_t {
+	global_state_t global_state;
+	char *old_content_encoding;
+	char *old_etag;
 	unsigned char *buffer;
 	size_t buffer_digest_getpos;
 	size_t buffer_read_getpos;
@@ -101,13 +107,79 @@ static const char *set_crccache_server(cmd_parms *parms, void *dummy, int flag)
 	return NULL;
 }
 
+static const char *set_crccache_decoder_module(cmd_parms *parms, void *in_struct_ptr, const char *arg)
+{
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
+				&crccache_server_module);
+	struct decoder_modules_t *decoder_module = malloc(sizeof(*decoder_module));
+	if (decoder_module == NULL)
+	{
+		return "Out of memory exception while allocating decoder_module structure";
+	}
+	char *tok;
+	char *last = NULL;
+
+	char *data = strdup(arg);
+	if (data == NULL)
+	{
+		return "Out of memory exception while parsing DecoderModule parameter";
+	}
+	
+	tok = apr_strtok(data, ": ", &last);
+	if (tok == NULL)
+	{
+		return "DecoderModule value must be of format:  filtername:encoding[,encoding]*";
+	}
+
+	decoder_module->name = strdup(tok);
+	if (decoder_module->name == NULL)
+	{
+		return "Out of memory exception while storing name in decoder_module structure";
+	}
+	
+	tok = apr_strtok(NULL, ": ", &last);
+	if (tok == NULL)
+	{
+		return "DecoderModule value must be of format:  filtername:encoding[,encoding]*";
+	}
+	
+	for (tok = apr_strtok(tok, ", ", &last); tok != NULL; tok = apr_strtok(NULL, ", ", &last))
+	{
+		struct encodings_t *encoding = malloc(sizeof(*encoding));
+		if (encoding == NULL)
+		{
+			return "Out of memory exception while allocating encoding structure";
+		}
+
+		encoding->encoding = strdup(tok);
+		if (encoding->encoding == NULL)
+		{
+			return "Out of memory exception while storing encoding value in encoding structure";
+		}
+		
+		// Insert new encoding to the head of the encodings list
+		encoding->next = decoder_module->encodings;
+		decoder_module->encodings = encoding;
+	}
+
+	// Insert (new) decoder module to the head of the decoder_modules list
+	decoder_module->next = conf->decoder_modules;
+	conf->decoder_modules = decoder_module;
+	conf->decoder_modules_cnt++;
+	
+	return NULL;
+}
+
 static const command_rec crccache_server_cmds[] =
 {
 	AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF, "Enable the CRCCache server in this virtual server"),
+	AP_INIT_TAKE1("DecoderModule", set_crccache_decoder_module, NULL, RSRC_CONF, "DecoderModules to decode content-types (e.g. INFLATE:gzip,x-gzip)"),
 	{ NULL }
 };
 
 static ap_filter_rec_t *crccache_out_filter_handle;
+static ap_filter_rec_t *crccache_out_save_headers_filter_handle;
+
 
 int decode_if_block_header(const char * header, int * version, size_t * file_size, char ** hashes)
 {
@@ -168,26 +240,87 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				// failed to decode if block header so just process request normally
 				return OK;
 			}
-			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found so enabling protocol: %s",hashes);
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found (hashes: %s)",hashes);
 			free (hashes);
 			hashes = NULL;
-			// TODO: save etag and content-encoding headers before INFLATE modifies them, for later reuse in this module itself
-			//        (to construct etag-crcsync-<original-encoding> header) (is it possible to pass info from here to the main module?)
-			// Insert mod_deflate's INFLATE filter in the chain to unzip content
-			// so that there is clear text available for the delta algorithm
-			ap_filter_t *inflate_filter = ap_add_output_filter("INFLATE", NULL, r, r->connection);
-			if (inflate_filter == NULL)
-			{
-				ap_log_error(APLOG_MARK, APLOG_WARNING, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Could not enable INFLATE filter. Will be unable to handle deflated encoded content");
-			}
-			else
-			{
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Successfully enabled INFLATE filter to handle deflated content");
-			}
-			// And the crccache filter itself ofcourse
-			ap_add_output_filter_handle(crccache_out_filter_handle,
-					NULL, r, r->connection);
+			
+			crccache_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+			ctx->global_state = GS_INIT;
+			ctx->old_content_encoding = NULL;
+			ctx->old_etag = NULL;
 
+			// Add the filter to save the headers, so that they can be restored after an optional INFLATE or other decoder module
+			ap_add_output_filter_handle(crccache_out_save_headers_filter_handle,
+					ctx, r, r->connection);
+
+			char *accept_encoding = apr_pstrdup(r->pool, apr_table_get(r->headers_in, ACCEPT_ENCODING_HEADER));
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Incoming Accept-Encoding header: %s", accept_encoding == NULL ? "NULL" : accept_encoding);
+			if (accept_encoding != NULL)
+			{
+				struct decoder_modules_t *required_dms[conf->decoder_modules_cnt];
+				unsigned required_dms_size = 0;
+				char *tok;
+				char *last = NULL;
+				struct decoder_modules_t *dm;
+				struct encodings_t *enc;
+				unsigned cnt;
+				// Build the list of filter modules to handle the requested encodings and 
+				// remove all non-supported encodings from the header
+				apr_table_unset(r->headers_in, ACCEPT_ENCODING_HEADER);
+				for (tok = apr_strtok(accept_encoding, ", ", &last); tok != NULL; tok = apr_strtok(NULL, ", ", &last)) {
+					for (dm = conf->decoder_modules; dm != NULL; dm = dm->next) {
+						for (enc = dm->encodings; enc != NULL; enc = enc->next) {
+							if (strcmp(tok, enc->encoding) == 0)
+							{
+								// This module supports the requested encoding
+								// Add it to the list if it is not already present
+								for (cnt = 0; cnt != required_dms_size; cnt++)
+								{
+									if (required_dms[cnt] == dm)
+										break; // module is already inserted in list
+								}
+								if (cnt == required_dms_size)
+								{
+									required_dms[required_dms_size++] = dm;
+								}
+								apr_table_mergen(r->headers_in, ACCEPT_ENCODING_HEADER, tok);
+							}
+						}
+					}
+				}
+				// Enable the requested filter modules 
+				for (cnt = 0; cnt != required_dms_size; cnt++)	{
+					dm = required_dms[cnt];
+					ap_filter_t *filter = ap_add_output_filter(dm->name, NULL, r, r->connection);
+					if (filter == NULL) {
+						ap_log_error(APLOG_MARK, APLOG_WARNING, APR_SUCCESS, r->server,	"CRCCACHE-ENCODE Could not enable %s filter", dm->name);
+						// Remove the encodings handled by this filter from the list of accepted encodings
+						accept_encoding = apr_pstrdup(r->pool, apr_table_get(r->headers_in, ACCEPT_ENCODING_HEADER));
+						apr_table_unset(r->headers_in, ACCEPT_ENCODING_HEADER);
+						for (tok = apr_strtok(accept_encoding, ", ", &last); tok != NULL; tok = apr_strtok(NULL, ", ", &last)) {
+							for (enc = dm->encodings; enc != NULL; enc = enc->next) {
+								if (strcmp(tok, enc->encoding)==0) {
+									ap_log_error(APLOG_MARK, APLOG_WARNING, APR_SUCCESS, r->server,	"CRCCACHE-ENCODE Removing encoding %s", tok);
+									break;
+								}
+							}
+							if (enc == NULL) {
+								// Did not find the tok encoding in the list. It can be merged back into the header
+								apr_table_mergen(r->headers_in, ACCEPT_ENCODING_HEADER, tok);
+							}
+						}
+					}
+					else
+					{
+						ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Successfully enabled %s filter", dm->name);
+					}
+				}
+				const char *updated_accept_encoding = apr_table_get(r->headers_in, ACCEPT_ENCODING_HEADER);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Modified Accept-Encoding header: %s", updated_accept_encoding == NULL ? "NULL" : updated_accept_encoding);
+			}
+			// Add the crccache filter itself, after the decoder modules
+			ap_add_output_filter_handle(crccache_out_filter_handle,
+					ctx, r, r->connection);
 		}
 		else
 		{
@@ -215,13 +348,19 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 	return 226;
 }*/
 
-/* TODO: change etag as per document (e.g. append '-crcsync-<original-encoding>' to the etag header)
- */
-static void crccache_check_etag(request_rec *r, const char *transform) {
-	const char *etag = apr_table_get(r->headers_out, "ETag");
-	if (etag && (((etag[0] != 'W') && (etag[0] != 'w')) || (etag[1] != '/'))) {
-		apr_table_set(r->headers_out, "ETag", apr_pstrcat(r->pool, etag, "-",
-				transform, NULL));
+static void crccache_check_etag(request_rec *r, crccache_ctx *ctx, const char *transform) {
+	const char *etag = ctx->old_etag;
+	if (etag) {
+		apr_table_set(r->headers_out, ETAG_HEADER, 
+				apr_pstrcat(
+						r->pool, 
+						etag, "-",
+						transform, "-",
+						ctx->old_content_encoding == NULL ? "identity" : ctx->old_content_encoding,
+						NULL
+				)
+		);
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE-ENCODE Changed ETag header to %s", apr_table_get(r->headers_out, ETAG_HEADER));
 	}
 }
 
@@ -421,8 +560,9 @@ static apr_status_t process_block(ap_filter_t *f)
 			"CRCCACHE-ENCODE crc_read_block ndigested: %zu, result %ld", ndigested, rd_block_rslt);
 
 
-	// rd_block_rslt = 0: do nothing (it is a 'literal' block of exactly 'blocksize' bytes at the end of the buffer, it will have to be moved
-	//  to the beginning of the moving window so that it can be written upon the next call to crc_read_block or crc_read_flush)
+	// rd_block_rslt = 0: do nothing (it is a 'literal' block of exactly 'tail_blocksize' bytes at the end of the buffer,
+	//  it will have to be moved to the beginning of the moving window so that it can be written upon the next call to
+	//  crc_read_block or crc_read_flush)
 	// rd_block_rslt > 0: send literal
 	// rd_block_rslt < 0: send block
 	if (rd_block_rslt > 0)
@@ -601,19 +741,19 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		{
 			// Buffer is filled to the end. Flush as much as possible
 			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
-					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
-			while (ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->block_size)
+					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
+			while (ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->tail_block_size)
 			{
-				// We can still scan at least 1 block + 1 byte forward: try to flush next part
+				// We can still scan at least 1 tail block + 1 byte forward: try to flush next part
 				rslt = process_block(f);
 				if (rslt != APR_SUCCESS)
 				{
 					return rslt;
 				}
 				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
-					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
+						"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
 			}
 
 			if (ctx->buffer_putpos != ctx->buffer_read_getpos)
@@ -630,12 +770,12 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 			ctx->buffer_digest_getpos -= ctx->buffer_read_getpos;
 			ctx->buffer_read_getpos = 0;
 		}
-		while (ctx->crc_read_block_result < 0 && ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->block_size)
+		while (ctx->crc_read_block_result < 0 && ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->tail_block_size)
 		{
 			// Previous block matched exactly. Let's hope the next block as well
 			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (blocksize: %zu)",
-					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->block_size);
+					"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
 			rslt = process_block(f);
 			if (rslt != APR_SUCCESS)
 			{
@@ -665,13 +805,13 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		return ap_pass_brigade(f->next, bb);
 	}
 
-	/* If we don't have a context, we need to ensure that it is okay to send
-	 * the deflated content.  If we have a context, that means we've done
+	/* If state is not yet GS_ENCODING content, we need to ensure that it is okay to send
+	 * the encoded content.  If the state is GS_ENCODING, that means we've done
 	 * this before and we liked it.
 	 * This could be not so nice if we always fail.  But, if we succeed,
 	 * we're in better shape.
 	 */
-	if (ctx == NULL)
+	if (ctx->global_state != GS_ENCODING)
 	{
 		const char *encoding;
 
@@ -686,25 +826,31 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
-
-		/* Let's see what our current Content-Encoding is.
-		 * If it's already encoded by crccache: don't compress again.
-		 * (We could, but let's not.)
-		 */
-		encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
-		if (encoding && strcasecmp(CRCCACHE_ENCODING,encoding) == 0)
+		
+		if (ctx->global_state != GS_HEADERS_SAVED)
 		{
-			/* Even if we don't accept this request based on it not having
-			 * the Accept-Encoding, we need to note that we were looking
-			 * for this header and downstream proxies should be aware of that.
-			 */
-			apr_table_mergen(r->headers_out, "Vary", "A-IM");
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server, "CRCCACHE-ENCODE unexpected ctx-state: %d, expected: %d", ctx->global_state, GS_HEADERS_SAVED);
+			return APR_EGENERAL;
+		}
+
+		/* Indicate to caches that they may only re-use this response for a request
+		 * with the same BLOCK_HEADER value as the current request
+		 * Indicate to clients that the server supports crcsync, even if checks
+		 * further down prevent this specific response from being crc-encoded
+		 */
+		apr_table_mergen(r->headers_out, VARY_HEADER, BLOCK_HEADER);
+
+		/* If Content-Encoding is present and differs from "identity", we can't handle it */
+		encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
+		if (encoding && strcasecmp(encoding, "identity")) {
+			ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, r->server,
+					"Not encoding with crccache. It is already encoded with: %s", encoding);
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
 
 		/* For a 304 or 204 response there is no entity included in
-		 * the response and hence nothing to deflate. */
+		 * the response and hence nothing to crc-encode. */
 		if (r->status == HTTP_NOT_MODIFIED || r->status ==HTTP_NO_CONTENT)
 		{
 			ap_remove_output_filter(f);
@@ -712,20 +858,12 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		}
 
 		/* All Ok. We're cool with filtering this. */
-		ctx = f->ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+		ctx->global_state = GS_ENCODING;
 		ctx->debug_skip_writing = 0;
 		ctx->orig_length = 0;
 		ctx->tx_length = 0;
 		ctx->tx_uncompressed_length = 0;
 		ctx->bb = apr_brigade_create(r->pool, f->c->bucket_alloc);
-
-		/* If Content-Encoding present and differs from "identity", we can't handle it */
-		if (encoding && strcasecmp(encoding, "identity")) {
-			ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, r->server,
-					"Not encoding with crccache. It is already encoded with: %s", encoding);
-			ap_remove_output_filter(f);
-			return ap_pass_brigade(f->next, bb);
-		}
 
 		/* Parse the input headers */
 		const char * header;
@@ -760,14 +898,14 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			htobe64(ctx->hashes[i]);
 		}
 
-		// Data come in at chunks that are potentially smaller then block_size
+		// Data come in at chunks that are potentially smaller then block_size or tail_block_size
 		// Accumulate those chunks into a buffer.
-		// The buffer must be at least 2*block_size so that crc_read_block(...) can find a matching block, regardless
+		// The buffer must be at least block_size+tail_block_size so that crc_read_block(...) can find a matching block, regardless
 		// of the data alignment compared to the original page.
 		// The buffer is basically a moving window in the new page. So sometimes the last part of the buffer must be
 		// copied to the beginning again. The larger the buffer, the less often such a copy operation is required
 		// Though, the larger the buffer, the bigger the memory demand.
-		// A size of 4*block_size (20% of original file size) seems to be a good balance
+		// A size of 3*block_size+tail_block_size+1 (20% of original file size) seems to be a good balance
 
 		// TODO: tune the buffer-size depending on the mime-type. Already compressed data (zip, gif, jpg, mpg, etc) will
 		// probably only have matching blocks if the file is totally unmodified. As soon as one byte differs in the original
@@ -775,14 +913,12 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		// much sense to even keep invoking the crc_read_block(...) function as soon as a difference has been found.
 		// Hence, no need to make a (potentially huge) buffer for these type of compressed (potentially huge, think about movies)
 		// data types.
-		ctx->buffer_size = ctx->block_size*4 + 1;
+		ctx->buffer_size = ctx->block_size*3 + ctx->tail_block_size + 1;
 		ctx->buffer_digest_getpos = 0;
 		ctx->buffer_read_getpos = 0;
 		ctx->buffer_putpos = 0;
 		ctx->crc_read_block_result = 0;
 		ctx->buffer = apr_palloc(r->pool, ctx->buffer_size);
-
-
 
 		/* Setup deflate for compressing non-matched literal data */
 		ctx->compression_state = COMPRESSION_BUFFER_EMPTY;
@@ -823,19 +959,18 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		// All checks and initializations are OK
 		// Modify headers that are impacted by this transformation
-		// TODO: the crccache-client could recalculate these headers once it has
-		//        reconstructed the page, before handling the reconstructed page
-		//        back to the client
 		apr_table_setn(r->headers_out, ENCODING_HEADER, CRCCACHE_ENCODING);
-		apr_table_addn(r->headers_out, VARY_HEADER, VARY_VALUE);
 		apr_table_unset(r->headers_out, "Content-Length");
 		apr_table_unset(r->headers_out, "Content-MD5");
-		crccache_check_etag(r, CRCCACHE_ENCODING);
+		crccache_check_etag(r, ctx, CRCCACHE_ENCODING);
 
-		// All is okay, so set response header to IM Used
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "CRCCACHE Server end of context setup");
-		//r->status=226;
-		//r->status_line="226 IM Used";
+	}
+
+	if (ctx->global_state != GS_ENCODING)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server, "CRCCACHE-ENCODE unexpected ctx-state: %d, expected: %d", ctx->global_state, GS_ENCODING);
+		return APR_EGENERAL;
 	}
 
 	while (!APR_BRIGADE_EMPTY(bb))
@@ -888,7 +1023,6 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		}
 
 		if (APR_BUCKET_IS_METADATA(e)) {
-			// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE metadata APR bucket");
 			/*
 			 * Remove meta data bucket from old brigade and insert into the
 			 * new.
@@ -920,6 +1054,66 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
     return return_code;
 }
 
+
+/*
+ * CACHE_OUT_SAVE_HEADERS filter
+ * ----------------
+ *
+ * Save headers into the context
+ */
+static apr_status_t crccache_out_save_headers_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
+	request_rec *r = f->r;
+	crccache_ctx *ctx = f->ctx;
+
+	/* Do nothing if asked to filter nothing. */
+	if (APR_BRIGADE_EMPTY(bb)) {
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE (save headers) bucket brigade is empty -> nothing todo");
+		return ap_pass_brigade(f->next, bb);
+	}
+
+	if (ctx->global_state != GS_INIT)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, r->server, "CRCCACHE-ENCODE (save headers) unexpected ctx-state: %d, expected: %d", ctx->global_state, GS_INIT);
+		return APR_EGENERAL;
+	}
+	
+	/* only work on main request/no subrequests */
+	if (r->main != NULL) {
+		ap_remove_output_filter(f);
+		return ap_pass_brigade(f->next, bb);
+	}
+
+	/* We can't operate on Content-Ranges */
+	if (apr_table_get(r->headers_out, "Content-Range") != NULL) {
+		ap_remove_output_filter(f);
+		return ap_pass_brigade(f->next, bb);
+	}
+
+	 /* Save content-encoding and etag header for later usage by the crcsync
+	  * encoder
+	 */
+	const char *encoding = apr_table_get(r->headers_out, ENCODING_HEADER);
+	if (encoding != NULL)
+	{
+		ctx->old_content_encoding = apr_pstrdup(r->pool, encoding);
+		ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, r->server,
+				"Saved old content-encoding: %s", encoding);
+	}
+	const char *etag = apr_table_get(r->headers_out, ETAG_HEADER);
+	if (etag != NULL)
+	{
+		ctx->old_etag = apr_pstrdup(r->pool, etag);
+		ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, r->server,
+				"Saved old etag: %s", etag);
+	}
+	ctx->global_state = GS_HEADERS_SAVED;
+	
+	/* Done saving headers. Nothing left to do */
+	ap_remove_output_filter(f);
+	return ap_pass_brigade(f->next, bb);
+}
+
+
 static void crccache_server_register_hook(apr_pool_t *p) {
 	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
 			"Registering crccache server module, (C) 2009, Toby Collett and Alex Wulms");
@@ -930,6 +1124,9 @@ static void crccache_server_register_hook(apr_pool_t *p) {
         ap_register_output_filter("CRCCACHE_HEADER", crccache_server_header_filter_handler,
                                   NULL, AP_FTYPE_PROTOCOL);
 */
+	crccache_out_save_headers_filter_handle = ap_register_output_filter("CRCCACHE_OUT_SAVE_HEADERS",
+			crccache_out_save_headers_filter, NULL, AP_FTYPE_RESOURCE-1); // make sure to handle it *before* INFLATE filter (or other decode modules)
+	
 	crccache_out_filter_handle = ap_register_output_filter("CRCCACHE_OUT",
 			crccache_out_filter, NULL, AP_FTYPE_CONTENT_SET);
 }

@@ -6,6 +6,7 @@
 	ServerName localhost
 
 	CRCcacheServer On
+	DecoderModule INFLATE:gzip,x-gzip
 
 	ProxyRequests On
 	ProxyVia On

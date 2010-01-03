@@ -21,10 +21,13 @@
 #endif
 
 #define CRCCACHE_ENCODING "crcsync"
+const char * ACCEPT_ENCODING_HEADER = "Accept-Encoding";
 const char * ENCODING_HEADER = "Content-Encoding";
 const char * BLOCK_HEADER = "If-Block";
 const char * VARY_HEADER = "Vary";
 const char * VARY_VALUE = "If-Block";
+const char * ETAG_HEADER = "ETag";
+
 const int HASH_SIZE=64; // bits per has, 30 bits is 5 bytes base 64
 
 // HASH_SIZE_BYTES*FULL_BLOCK_COUNT*4/3 rounded up to the nearest multiple of 3

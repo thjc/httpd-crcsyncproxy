@@ -13,11 +13,22 @@
 
 extern module AP_MODULE_DECLARE_DATA crccache_server_module;
 
+struct encodings_t {
+	struct encodings_t *next;
+	const char *encoding;
+};
+
+struct decoder_modules_t {
+	struct decoder_modules_t *next;
+	const char *name;
+	struct encodings_t *encodings;
+};
 
 /* Static information about the crccache server */
 typedef struct {
 	int enabled;
-//	disk_cache_conf *disk_cache_conf;
+	struct decoder_modules_t *decoder_modules;
+	unsigned decoder_modules_cnt;
 } crccache_server_conf;
 
 #endif /*MOD_CRCCACHE_SERVER_H*/
