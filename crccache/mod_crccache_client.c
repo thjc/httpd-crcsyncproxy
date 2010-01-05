@@ -132,7 +132,7 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	// this will be rounded down, but thats okay
 	size_t blocksize = len/FULL_BLOCK_COUNT;
 	size_t tail_block_size = blocksize + len % FULL_BLOCK_COUNT;
-	size_t block_count_including_final_block = FULL_BLOCK_COUNT;// + (tail_block_size != 0);
+	size_t block_count_including_final_block = FULL_BLOCK_COUNT;
 	// sanity check for very small files
 	if (blocksize> 4)
 	{
@@ -174,10 +174,6 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 
 		uint64_t crcs[block_count_including_final_block];
 		crc_of_blocks(data, len, blocksize, HASH_SIZE, true, crcs);
-//		for (i = 0; i < FULL_BLOCK_COUNT - 1; i++) {
-//			crcs[i] = crc64_iso(0, &data[i*blocksize], blocksize);
-//		}
-//		crcs[FULL_BLOCK_COUNT-1] = crc64_iso(0, &data[(FULL_BLOCK_COUNT-1)*blocksize], tail_block_size);
 
 		// swap to network byte order
 		for (i = 0; i < block_count_including_final_block;++i)
@@ -192,7 +188,7 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// TODO; bit of a safety margin here, could calculate exact size
 		const int block_header_max_size = HASH_HEADER_SIZE+40;
 		char block_header_txt[block_header_max_size];
-		snprintf(block_header_txt, block_header_max_size,"v=1, fs=%zu, h=%s",len,hash_set);
+		snprintf(block_header_txt, block_header_max_size,"v=1; fs=%zu; h=%s",len,hash_set);
 		apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
 		// TODO: do we want to cache the hashes here?
 
@@ -204,6 +200,9 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
 		// we need that to fill in the matched blocks.
+		// TODO: does the original cached data file remain open between this request
+		//        and the subsequent response or do we run the risk that a concurrent
+		//        request modifies it?
 		ap_add_output_filter_handle(crccache_decode_filter_handle,
 		ctx, r, r->connection);
 
@@ -254,6 +253,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		char * vary = apr_pstrdup(r->pool, apr_table_get(r->headers_out, "Vary"));
 		if (vary)
 		{
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "Incoming Vary header: %s", vary);
 			apr_table_unset(r->headers_out, "Vary");
 			char * tok;
 			char * last = NULL;
@@ -267,9 +267,11 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 		}
 
 		// fix up etag
-		char * etag = apr_pstrdup(r->pool, apr_table_get(r->headers_out, "etag"));
+		char * etag = apr_pstrdup(r->pool, apr_table_get(r->headers_out, ETAG_HEADER));
 		if (etag)
 		{
+			// TODO: get original encoding from etag header so that it can be re-applied
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "Incoming ETag header: %s", etag);
 			int etaglen = strlen(etag);
 			if (etaglen>strlen(CRCCACHE_ENCODING) + 1)
 			{

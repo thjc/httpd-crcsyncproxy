@@ -22,6 +22,7 @@
 
 #define CRCCACHE_ENCODING "crcsync"
 const char * ACCEPT_ENCODING_HEADER = "Accept-Encoding";
+const char * CAPABILITY_HEADER = "Capability";
 const char * ENCODING_HEADER = "Content-Encoding";
 const char * BLOCK_HEADER = "If-Block";
 const char * VARY_HEADER = "Vary";

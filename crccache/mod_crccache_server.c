@@ -191,7 +191,7 @@ int decode_if_block_header(const char * header, int * version, size_t * file_siz
 	size_t headerlen = strlen(header);
 	for (ii = 0; ii < headerlen;++ii)
 	{
-		if (header[ii] == ',' || ii == headerlen-1)
+		if (header[ii] == ';' || ii == headerlen-1)
 		{
 			sscanf(&header[start]," v=%d",version);
 			sscanf(&header[start]," h=%as",hashes);
@@ -232,23 +232,25 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 		header = apr_table_get(r->headers_in, BLOCK_HEADER);
 		if (header)
 		{
+			crccache_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+			ctx->global_state = GS_INIT;
+			ctx->old_content_encoding = NULL;
+			ctx->old_etag = NULL;
+
 			int version;
 			size_t file_size;
 			char * hashes;
 			if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
 			{
-				// failed to decode if block header so just process request normally
+				// failed to decode if block header so only put the Capability header in the response
+				ap_add_output_filter_handle(crccache_out_filter_handle,
+						ctx, r, r->connection);
 				return OK;
 			}
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found (hashes: %s)",hashes);
 			free (hashes);
 			hashes = NULL;
 			
-			crccache_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-			ctx->global_state = GS_INIT;
-			ctx->old_content_encoding = NULL;
-			ctx->old_etag = NULL;
-
 			// Add the filter to save the headers, so that they can be restored after an optional INFLATE or other decoder module
 			ap_add_output_filter_handle(crccache_out_save_headers_filter_handle,
 					ctx, r, r->connection);
@@ -823,6 +825,17 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		/* We can't operate on Content-Ranges */
 		if (apr_table_get(r->headers_out, "Content-Range") != NULL) {
+			ap_remove_output_filter(f);
+			return ap_pass_brigade(f->next, bb);
+		}
+		
+		// Advertise crcsync capability and preferred blocksize multiple
+		apr_table_mergen(r->headers_out, CAPABILITY_HEADER, "crcsync; m=1");
+
+		if (ctx->global_state == GS_INIT)
+		{
+			// Still in GS_INIT state implies there is no need to encode.
+			// It is sufficient that the capability header has been set
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
