@@ -325,13 +325,13 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 			if (memcmp(md_value, ctx->md_value_rx, 20) != 0)
 			{
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED");
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED for uri %s", r->unparsed_uri);
 				apr_brigade_cleanup(bb);
 				return APR_EGENERAL;
 			}
 			else
 			{
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK PASSED");
+				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK PASSED for uri %s", r->unparsed_uri);
 			}
 
 			/* Okay, we've seen the EOS.
