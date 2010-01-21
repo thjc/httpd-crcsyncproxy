@@ -63,6 +63,8 @@ static void *crccache_server_create_config(apr_pool_t *p, server_rec *s) {
 	conf->enabled = 0;
 	conf->decoder_modules = NULL;
 	conf->decoder_modules_cnt = 0;
+	conf->regexs = NULL;
+	conf->regexs_tail = NULL;
 	return conf;
 }
 
@@ -107,19 +109,64 @@ static const char *set_crccache_server(cmd_parms *parms, void *dummy, int flag)
 	return NULL;
 }
 
+static const char *add_crccache_similar_page_regex (cmd_parms *parms, void *in_struct_ptr, const char *arg)
+{
+	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
+				&crccache_server_module);
+
+	// Allocate the regexs structure
+	regexs_t *regexs = apr_palloc(parms->pool, sizeof(regexs_t));
+	if (regexs == NULL)
+	{
+		return "Out of memory exception while allocating regexs structure";
+	}
+	regexs->preg = apr_palloc(parms->pool, sizeof(ap_regex_t));
+	if (regexs == NULL)
+	{
+		return "Out of memory exception while allocating regexs->preg structure";
+	}
+	regexs->regex = apr_pstrdup(parms->pool, arg);
+	if (regexs->regex == NULL)
+	{
+		return "Out of memory exception while allocating regexs->regex parameter";
+	}
+	// Compile the regular expression
+	int rslt = ap_regcomp(regexs->preg, arg, 0);
+	if (rslt != 0)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE ap_regcomp return code: %d", rslt);
+		return "Failure to compile regular expression";
+	}
+	// Add regular expression to the tail of the regular expressions list
+	regexs->next = NULL;
+	if (conf->regexs_tail == NULL)
+	{
+		conf->regexs = regexs;
+		conf->regexs_tail = regexs;
+	}
+	else
+	{
+		conf->regexs_tail->next = regexs;
+		conf->regexs_tail = regexs;
+	}
+	
+	return NULL;
+}
+
+
 static const char *set_crccache_decoder_module(cmd_parms *parms, void *in_struct_ptr, const char *arg)
 {
 	crccache_server_conf *conf = ap_get_module_config(parms->server->module_config,
 				&crccache_server_module);
-	struct decoder_modules_t *decoder_module = malloc(sizeof(*decoder_module));
-	if (decoder_module == NULL)
+	decoder_modules_t *decoder_modules = apr_palloc(parms->pool, sizeof(*decoder_modules));
+	if (decoder_modules == NULL)
 	{
-		return "Out of memory exception while allocating decoder_module structure";
+		return "Out of memory exception while allocating decoder_modules structure";
 	}
 	char *tok;
 	char *last = NULL;
 
-	char *data = strdup(arg);
+	char *data = apr_pstrdup(parms->pool, arg);
 	if (data == NULL)
 	{
 		return "Out of memory exception while parsing DecoderModule parameter";
@@ -131,8 +178,8 @@ static const char *set_crccache_decoder_module(cmd_parms *parms, void *in_struct
 		return "DecoderModule value must be of format:  filtername:encoding[,encoding]*";
 	}
 
-	decoder_module->name = strdup(tok);
-	if (decoder_module->name == NULL)
+	decoder_modules->name = apr_pstrdup(parms->pool, tok);
+	if (decoder_modules->name == NULL)
 	{
 		return "Out of memory exception while storing name in decoder_module structure";
 	}
@@ -145,26 +192,26 @@ static const char *set_crccache_decoder_module(cmd_parms *parms, void *in_struct
 	
 	for (tok = apr_strtok(tok, ", ", &last); tok != NULL; tok = apr_strtok(NULL, ", ", &last))
 	{
-		struct encodings_t *encoding = malloc(sizeof(*encoding));
-		if (encoding == NULL)
+		encodings_t *encodings = apr_palloc(parms->pool, sizeof(*encodings));
+		if (encodings == NULL)
 		{
 			return "Out of memory exception while allocating encoding structure";
 		}
 
-		encoding->encoding = strdup(tok);
-		if (encoding->encoding == NULL)
+		encodings->encoding = apr_pstrdup(parms->pool, tok);
+		if (encodings->encoding == NULL)
 		{
 			return "Out of memory exception while storing encoding value in encoding structure";
 		}
 		
 		// Insert new encoding to the head of the encodings list
-		encoding->next = decoder_module->encodings;
-		decoder_module->encodings = encoding;
+		encodings->next = decoder_modules->encodings;
+		decoder_modules->encodings = encodings;
 	}
 
 	// Insert (new) decoder module to the head of the decoder_modules list
-	decoder_module->next = conf->decoder_modules;
-	conf->decoder_modules = decoder_module;
+	decoder_modules->next = conf->decoder_modules;
+	conf->decoder_modules = decoder_modules;
 	conf->decoder_modules_cnt++;
 	
 	return NULL;
@@ -174,6 +221,7 @@ static const command_rec crccache_server_cmds[] =
 {
 	AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF, "Enable the CRCCache server in this virtual server"),
 	AP_INIT_TAKE1("DecoderModule", set_crccache_decoder_module, NULL, RSRC_CONF, "DecoderModules to decode content-types (e.g. INFLATE:gzip,x-gzip)"),
+	AP_INIT_ITERATE("AddSimilarPageRegEx", add_crccache_similar_page_regex, NULL, RSRC_CONF, "Regular expression to indicate which pages are similar to each other"),
 	{ NULL }
 };
 
@@ -227,15 +275,16 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			&crccache_server_module);
 	if (conf->enabled)
 	{
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Checking for headers");
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Checking for headers, for uri %s", r->unparsed_uri);
 		const char * header;
 		header = apr_table_get(r->headers_in, BLOCK_HEADER);
+		crccache_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+		ctx->global_state = GS_INIT;
+		ctx->old_content_encoding = NULL;
+		ctx->old_etag = NULL;
+
 		if (header)
 		{
-			crccache_ctx *ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-			ctx->global_state = GS_INIT;
-			ctx->old_content_encoding = NULL;
-			ctx->old_etag = NULL;
 
 			int version;
 			size_t file_size;
@@ -243,8 +292,9 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
 			{
 				// failed to decode if block header so only put the Capability header in the response
-				ap_add_output_filter_handle(crccache_out_filter_handle,
-						ctx, r, r->connection);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Failed to decode block header (%s:%s)",BLOCK_HEADER, header);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Enabling crccache_out_filter to set Capability and Crcsync-Similar header only");
+				ap_add_output_filter_handle(crccache_out_filter_handle, ctx, r, r->connection);
 				return OK;
 			}
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Block Hashes header found (hashes: %s)",hashes);
@@ -259,12 +309,12 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Incoming Accept-Encoding header: %s", accept_encoding == NULL ? "NULL" : accept_encoding);
 			if (accept_encoding != NULL)
 			{
-				struct decoder_modules_t *required_dms[conf->decoder_modules_cnt];
+				decoder_modules_t *required_dms[conf->decoder_modules_cnt];
 				unsigned required_dms_size = 0;
 				char *tok;
 				char *last = NULL;
-				struct decoder_modules_t *dm;
-				struct encodings_t *enc;
+				decoder_modules_t *dm;
+				encodings_t *enc;
 				unsigned cnt;
 				// Build the list of filter modules to handle the requested encodings and 
 				// remove all non-supported encodings from the header
@@ -321,12 +371,15 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Modified Accept-Encoding header: %s", updated_accept_encoding == NULL ? "NULL" : updated_accept_encoding);
 			}
 			// Add the crccache filter itself, after the decoder modules
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Enabling crccache_out_filter to crcencode output");
 			ap_add_output_filter_handle(crccache_out_filter_handle,
 					ctx, r, r->connection);
 		}
 		else
 		{
 			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Did not detect blockheader (%s)", BLOCK_HEADER);
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Enabling crccache_out_filter to set Capability and Crcsync-Similar header only");
+			ap_add_output_filter_handle(crccache_out_filter_handle, ctx, r, r->connection);
 		}
 			
 /*		// All is okay, so set response header to IM Used
@@ -700,7 +753,7 @@ static apr_status_t process_eos(ap_filter_t *f)
 	write_hash(f, md_value, md_len);
 
 	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
-		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length);
+		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu) for uri %s",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length, f->r->unparsed_uri);
 
 	return APR_SUCCESS;
 }
@@ -803,7 +856,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 	/* Do nothing if asked to filter nothing. */
 	if (APR_BRIGADE_EMPTY(bb)) {
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE bucket brigade is empty -> nothing todo");
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE bucket brigade is empty -> nothing todo for uri %s", r->unparsed_uri);
 		return ap_pass_brigade(f->next, bb);
 	}
 
@@ -819,23 +872,43 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		/* only work on main request/no subrequests */
 		if (r->main != NULL) {
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE bucket brigade is empty -> nothing todo for uri %s", r->unparsed_uri);
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
 
 		/* We can't operate on Content-Ranges */
 		if (apr_table_get(r->headers_out, "Content-Range") != NULL) {
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE Content-Range header found -> nothing todo for uri %s", r->unparsed_uri);
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
 		
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE initializing filter process for uri %s", r->unparsed_uri);
+		
 		// Advertise crcsync capability and preferred blocksize multiple
 		apr_table_mergen(r->headers_out, CAPABILITY_HEADER, "crcsync; m=1");
+		
+		// Add Crcsync-Similar header if relevant
+		crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
+				&crccache_server_module);
+		regexs_t *regexs = conf->regexs;
+		// ap_regmatch_t regmatch;
+		while (regexs != NULL)
+		{
+			if (ap_regexec(regexs->preg, r->unparsed_uri, 0, NULL, AP_REG_ICASE) == 0)
+			{
+				// Found a regex to which this page is similar. Store it in the header
+				apr_table_set(r->headers_out, CRCSYNC_SIMILAR_HEADER, apr_pstrdup(r->pool, regexs->regex));
+				break; 
+			}
+			regexs=regexs->next;
+		}
 
 		if (ctx->global_state == GS_INIT)
 		{
 			// Still in GS_INIT state implies there is no need to encode.
-			// It is sufficient that the capability header has been set
+			// It is sufficient that the Capability and Crcsync-Similar headers have been set
 			ap_remove_output_filter(f);
 			return ap_pass_brigade(f->next, bb);
 		}
@@ -913,20 +986,19 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 
 		// Data come in at chunks that are potentially smaller then block_size or tail_block_size
 		// Accumulate those chunks into a buffer.
-		// The buffer must be at least block_size+tail_block_size so that crc_read_block(...) can find a matching block, regardless
+		// The buffer must be at least 2*tail_block_size+1 so that crc_read_block(...) can find a matching block, regardless
 		// of the data alignment compared to the original page.
 		// The buffer is basically a moving window in the new page. So sometimes the last part of the buffer must be
 		// copied to the beginning again. The larger the buffer, the less often such a copy operation is required
 		// Though, the larger the buffer, the bigger the memory demand.
-		// A size of 3*block_size+tail_block_size+1 (20% of original file size) seems to be a good balance
+		// A size of 4*tail_block_size+1 seems to be a good balance
 
 		// TODO: tune the buffer-size depending on the mime-type. Already compressed data (zip, gif, jpg, mpg, etc) will
 		// probably only have matching blocks if the file is totally unmodified. As soon as one byte differs in the original
 		// uncompressed data, the entire compressed data stream will be different anyway, so in such case it does not make
 		// much sense to even keep invoking the crc_read_block(...) function as soon as a difference has been found.
-		// Hence, no need to make a (potentially huge) buffer for these type of compressed (potentially huge, think about movies)
-		// data types.
-		ctx->buffer_size = ctx->block_size*3 + ctx->tail_block_size + 1;
+		// Hence, no need to make a (potentially huge, think about movies) buffer for these type of compressed data types.
+		ctx->buffer_size = ctx->tail_block_size*4 + 1;
 		ctx->buffer_digest_getpos = 0;
 		ctx->buffer_read_getpos = 0;
 		ctx->buffer_putpos = 0;
