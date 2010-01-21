@@ -284,14 +284,24 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 				phase = only_normal_rolling;
 			else
 				phase = both_rolling;
+
 	while (consumed != buflen && crcmatch == -1) {
 		size_t old_consumed = consumed;
 		switch (phase)
 		{
 		case non_rolling:
 			{
-				size_t nbytes = MIN(buflen - consumed, MIN(ctx->normal_block_size - ctx->literal_bytes, ctx->tail_block_size - ctx->literal_bytes));
-				ctx->running_tail_crc = ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+				size_t nbytes;
+				if (ctx->tail_block_size)
+				{
+					nbytes = MIN(buflen - consumed, MIN(ctx->normal_block_size - ctx->literal_bytes, ctx->tail_block_size - ctx->literal_bytes));
+					ctx->running_tail_crc = ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+				}
+				else
+				{
+					nbytes = MIN(buflen - consumed, ctx->normal_block_size - ctx->literal_bytes);
+					ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+				}
 				consumed += nbytes;
 				ctx->literal_bytes += nbytes;
 				get_pos += nbytes;
