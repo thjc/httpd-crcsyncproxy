@@ -47,7 +47,6 @@
 
 #include <crcsync/crcsync.h>
 #include <zlib.h>
-#include <openssl/evp.h>
 
 module AP_MODULE_DECLARE_DATA crccache_server_module;
 
@@ -93,8 +92,7 @@ typedef struct crccache_ctx_t {
 	size_t tx_uncompressed_length;
 	compression_state_t compression_state;
 	z_stream *compression_stream;
-	EVP_MD_CTX mdctx;
-	// struct apr_sha1_ctx_t sha1_ctx; 
+	struct apr_sha1_ctx_t sha1_ctx; 
 	int debug_skip_writing; // ____
 } crccache_ctx;
 
@@ -765,14 +763,9 @@ static apr_status_t process_eos(ap_filter_t *f)
 		return rslt;
 	}
 
-	unsigned md_len;
-	unsigned char md_value[EVP_MAX_MD_SIZE];
-	EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
-	EVP_MD_CTX_cleanup(&ctx->mdctx);
-	write_hash(f, md_value, md_len);
-	//unsigned char sha1_value[APR_SHA1_DIGESTSIZE];
-	//apr_sha1_final(sha1_value, &ctx->sha1_ctx);
-	//write_hash(f, sha1_value, APR_SHA1_DIGESTSIZE);
+	unsigned char sha1_value[APR_SHA1_DIGESTSIZE];
+	apr_sha1_final(sha1_value, &ctx->sha1_ctx);
+	write_hash(f, sha1_value, APR_SHA1_DIGESTSIZE);
 	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
 		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu) for uri %s",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length, f->r->unparsed_uri);
 
@@ -797,8 +790,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 	ctx->orig_length += len;
 	// update our sha1 hash
-	EVP_DigestUpdate(&ctx->mdctx, data, len);
-	//apr_sha1_update_binary(&ctx->sha1_ctx, (const unsigned char *)data, len);
+	apr_sha1_update_binary(&ctx->sha1_ctx, (const unsigned char *)data, len);
 	// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE normal data in APR bucket, read %ld", len);
 
 	// append data to the buffer and encode buffer content using the crc_read_block magic
@@ -1053,10 +1045,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		}
 
 		// initialise the context for our sha1 digest of the unencoded response
-		EVP_MD_CTX_init(&ctx->mdctx);
-		const EVP_MD *md = EVP_sha1();
-		EVP_DigestInit_ex(&ctx->mdctx, md, NULL);
-		//apr_sha1_init(&ctx->sha1_ctx);
+		apr_sha1_init(&ctx->sha1_ctx);
 
 		// now initialise the crcsync context that will do the real work
 		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, block_count_including_final_block, ctx->tail_block_size);

@@ -193,10 +193,8 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 		// TODO: do we want to cache the hashes here?
 
 		// initialise the context for our sha1 digest of the unencoded response
-		EVP_MD_CTX_init(&ctx->mdctx);
-		const EVP_MD *md = EVP_sha1();
-		EVP_DigestInit_ex(&ctx->mdctx, md, NULL);
-
+		apr_sha1_init(&ctx->sha1_ctx);
+		
 		// we want to add a filter here so that we can decode the response.
 		// we need access to the original cached data when we get the response as
 		// we need that to fill in the matched blocks.
@@ -318,12 +316,9 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			ap_remove_output_filter(f);
 
 			// check strong hash here
-			unsigned md_len;
-			unsigned char md_value[EVP_MAX_MD_SIZE];
-			EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
-			EVP_MD_CTX_cleanup(&ctx->mdctx);
-
-			if (memcmp(md_value, ctx->md_value_rx, 20) != 0)
+			unsigned char sha1_value[APR_SHA1_DIGESTSIZE];
+			apr_sha1_final(sha1_value, &ctx->sha1_ctx);
+			if (memcmp(sha1_value, ctx->sha1_value_rx, APR_SHA1_DIGESTSIZE) != 0)
 			{
 				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED for uri %s", r->unparsed_uri);
 				apr_brigade_cleanup(bb);
@@ -422,7 +417,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 					assert(block_number < (FULL_BLOCK_COUNT /*+ (ctx->tail_block_size != 0)*/));
 					memcpy(buf,&source_data[block_number*ctx->block_size],current_block_size);
 					// update our sha1 hash
-					EVP_DigestUpdate(&ctx->mdctx, buf, current_block_size);
+					apr_sha1_update_binary(&ctx->sha1_ctx, (const unsigned char *)buf, current_block_size);
 					apr_bucket * b = apr_bucket_pool_create(buf, current_block_size, r->pool, f->c->bucket_alloc);
 					APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 					break;
@@ -471,7 +466,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 					if (ctx->rx_count == ctx->literal_size)
 					{
-						EVP_DigestUpdate(&ctx->mdctx, ctx->partial_literal, ctx->literal_size);
+						apr_sha1_update_binary(&ctx->sha1_ctx, ctx->partial_literal, ctx->literal_size);
 						apr_bucket * b = apr_bucket_pool_create((char*)ctx->partial_literal, ctx->literal_size, r->pool, f->c->bucket_alloc);
 						APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 						ctx->state = DECODING_NEW_SECTION;
@@ -482,9 +477,9 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 				case DECODING_HASH:
 				{
 					unsigned avail_in = len - consumed_bytes;
-					// 20 bytes for an SHA1 hash
-					unsigned needed = MIN(20-ctx->rx_count, avail_in);
-					memcpy(&ctx->md_value_rx[ctx->rx_count], &data[consumed_bytes],needed);
+					// APR_SHA1_DIGESTSIZE bytes for a SHA1 hash
+					unsigned needed = MIN(APR_SHA1_DIGESTSIZE-ctx->rx_count, avail_in);
+					memcpy(&ctx->sha1_value_rx[ctx->rx_count], &data[consumed_bytes], needed);
 					ctx->rx_count+=needed;
 					consumed_bytes += needed;
 					if (ctx->rx_count == 20)
@@ -522,7 +517,7 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 							// write output data
 							char * buf = apr_palloc(r->pool, have);
 							memcpy(buf,decompressed_data_buf,have);
-							EVP_DigestUpdate(&ctx->mdctx, buf, have);
+							apr_sha1_update_binary(&ctx->sha1_ctx, (const unsigned char *)buf, have);
 							apr_bucket * b = apr_bucket_pool_create(buf, have, r->pool, f->c->bucket_alloc);
 							APR_BRIGADE_INSERT_TAIL(ctx->bb, b);
 						}

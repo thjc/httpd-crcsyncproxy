@@ -10,10 +10,10 @@
 
 #include "cache/cache.h"
 #include <zlib.h>
-#include <openssl/evp.h>
 #include <ap_config.h>
 #include <http_config.h>
 #include <apr_optional.h>
+#include <apr_sha1.h>
 
 extern module AP_MODULE_DECLARE_DATA crccache_client_module;
 
@@ -54,9 +54,8 @@ typedef struct crccache_client_ctx_t {
 	decompression_state_t decompression_state;
 	z_stream *decompression_stream;
 	int headers_checked;
-	EVP_MD_CTX mdctx;
-	unsigned char md_value_calc[EVP_MAX_MD_SIZE];
-	unsigned char md_value_rx[EVP_MAX_MD_SIZE];
+	struct apr_sha1_ctx_t sha1_ctx;
+	unsigned char sha1_value_rx[APR_SHA1_DIGESTSIZE];
 	unsigned rx_count;
 	unsigned literal_size;
 	unsigned char * partial_literal;// original data so we can fill in the matched blocks

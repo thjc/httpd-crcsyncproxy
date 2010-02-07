@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
-#include <gcrypt.h>
+#include <apr_sha1.h>
 #include "zlib.h"
 #include <crcsync/crcsync.h>
 
@@ -109,20 +109,15 @@ void crcvalidate_data(data_t *data, struct crc_context *crcctx)
 	crc_reset_running_crcs(crcctx);	
 }
 
-void sha256_data(data_t *data)
+void sha1_data(data_t *data)
 {
-	/* Length of resulting sha1 hash - gcry_md_get_algo_dlen
-	* returns digest lenght for an algo */
-	int hash_len = gcry_md_get_algo_dlen( GCRY_MD_SHA256 );
-
-	/* output SHA256 hash - this will be binary data */
-	unsigned char hash[ hash_len ];
+	/* output SHA1 hash - this will be binary data */
+	unsigned char hash[ APR_SHA1_DIGESTSIZE ];
+	apr_sha1_ctx_t sha1_ctx;
 	
-	/* calculate the SHA256 digest. This is a bit of a shortcut function
-	* most gcrypt operations require the creation of a handle, etc. */
-	gcry_md_hash_buffer( GCRY_MD_SHA1, hash, data->buf, data->datasize );
-
-	
+	apr_sha1_init(&sha1_ctx);
+	apr_sha1_update_binary(&sha1_ctx, data->buf, data->datasize);
+	apr_sha1_final(hash, &sha1_ctx);
 }
 
 ssize_t compress_tst(unsigned char *org_data_buf, size_t orglen, unsigned char *compressed_data_buf, size_t compressed_size)
@@ -314,13 +309,13 @@ int main(int argc, char *argv[])
 
 	crc_context_free(crcctx);
 
-	benchmark_t bm_sha256;
-	bm_sha256.start = clock();
+	benchmark_t bm_sha1;
+	bm_sha1.start = clock();
 	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
 	{
-		sha256_data(original_data);
+		sha1_data(original_data);
 	}
-	bm_sha256.end = clock();
+	bm_sha1.end = clock();
 
 	benchmark_t bm_decompress;
 	bm_decompress.start = clock();
@@ -332,7 +327,7 @@ int main(int argc, char *argv[])
 	printf("Original data size after decompression: %zd\n", original_data->datasize);
 	
 	printf(
-			"Nblocks: %zd, Block size: %zd, Tail block size: %zd, Compress: %.4f ms, Decompress: %.4f ms, Copy blocks: %.4f ms, New CRCCTX: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms, SHA256: %.4f ms\n", 
+			"Nblocks: %zd, Block size: %zd, Tail block size: %zd, Compress: %.4f ms, Decompress: %.4f ms, Copy blocks: %.4f ms, New CRCCTX: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms, SHA1: %.4f ms\n", 
 			block_count_including_final_block, block_size, tail_block_size,
 			duration_ms(&bm_compress)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_decompress)/TEST_ITERATIONS_COUNT,
@@ -341,7 +336,7 @@ int main(int argc, char *argv[])
 			duration_ms(&bm_crccalculate)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_crcvalidate_match)/TEST_ITERATIONS_COUNT,
 			duration_ms(&bm_crcvalidate_nomatch)/TEST_ITERATIONS_COUNT,
-			duration_ms(&bm_sha256)/TEST_ITERATIONS_COUNT
+			duration_ms(&bm_sha1)/TEST_ITERATIONS_COUNT
 			);
 //	printf(
 //			"Nblocks: %zd, Block size: %zd, Tail block size: %zd, New CRCCTX: %.4f ms, Calculate CRCs: %.4f ms, Validate match: %.4f ms, Validate nomatch: %.4f ms\n", 

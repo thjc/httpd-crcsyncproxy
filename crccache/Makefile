@@ -8,7 +8,7 @@ SOURCE_ROOT=..
 EXTRA_FLAGS=-D_LARGEFILE64_SOURCE -Wall -Werror -g -fPIC -I/usr/include/apache2 -I. -I$(SOURCE_ROOT) -I$(CCAN_PATH) -O3
 CFLAGS=`apr-config --cflags --includes` $(EXTRA_FLAGS)
 CXXFLAGS=`apr-config --cppflags --includes` $(EXTRA_FLAGS)
-LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz -lcrypto
+LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz
 
 all: mod_crccache_client.so mod_crccache_server.so benchmark test_hash_small_invokations
 
@@ -32,7 +32,7 @@ clean:
 	rm -rf *.so *.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
 
 benchmark: benchmark.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
-	gcc $^ -o $@ -lgcrypt -lgpg-error -lz
+	gcc $^ -o $@ $(LDFLAGS)
 
 test_hash_small_invokations: test_hash_small_invokations.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
 	gcc $^ -o $@
