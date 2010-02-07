@@ -31,6 +31,7 @@
 #include <apr_file_io.h>
 #include <apr_strings.h>
 #include <apr_base64.h>
+#include <apr_sha1.h>
 
 #include "ap_provider.h"
 
@@ -93,6 +94,7 @@ typedef struct crccache_ctx_t {
 	compression_state_t compression_state;
 	z_stream *compression_stream;
 	EVP_MD_CTX mdctx;
+	// struct apr_sha1_ctx_t sha1_ctx; 
 	int debug_skip_writing; // ____
 } crccache_ctx;
 
@@ -190,6 +192,7 @@ static const char *set_crccache_decoder_module(cmd_parms *parms, void *in_struct
 		return "DecoderModule value must be of format:  filtername:encoding[,encoding]*";
 	}
 	
+	decoder_modules->encodings = NULL;
 	for (tok = apr_strtok(tok, ", ", &last); tok != NULL; tok = apr_strtok(NULL, ", ", &last))
 	{
 		encodings_t *encodings = apr_palloc(parms->pool, sizeof(*encodings));
@@ -229,45 +232,61 @@ static ap_filter_rec_t *crccache_out_filter_handle;
 static ap_filter_rec_t *crccache_out_save_headers_filter_handle;
 
 
-int decode_if_block_header(const char * header, int * version, size_t * file_size, char ** hashes)
+int decode_if_block_header(request_rec *r, const char * header, int * version, size_t * file_size, char ** hashes)
 {
 	*version = 1;
 	*file_size = 0;
-	*hashes = NULL; // this will be allocated below, make sure we free it
+	*hashes = NULL; // this will be set to the appropriate value when hashes have been extracted
+	char *extracted_hashes; // buffer to extract hashes to
 	int start = 0;
 	int ii;
+	int rslt = 0;
+
 	size_t headerlen = strlen(header);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE headerlen: %zd", headerlen);
+
+	extracted_hashes = malloc(headerlen);
+	if (extracted_hashes == NULL)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "CRCCACHE-ENCODE can not allocate buffer to extract hashes into");
+		return -1;
+	}
+	
 	for (ii = 0; ii < headerlen;++ii)
 	{
 		if (header[ii] == ';' || ii == headerlen-1)
 		{
 			sscanf(&header[start]," v=%d",version);
-			sscanf(&header[start]," h=%as",hashes);
 			sscanf(&header[start]," fs=%zu",file_size);
+			if (sscanf(&header[start]," h=%s", extracted_hashes))
+			{
+				*hashes = extracted_hashes;
+			}
 			start = ii + 1;
 		}
 	}
 
 	if (*hashes == NULL)
 	{
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE no hashes reported in header");
-		return -1;
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "CRCCACHE-ENCODE no hashes reported in header");
+		rslt = -1;
 	}
 	if (*version != 1)
 	{
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE Unsupported header version, %d",*version);
-		free(*hashes);
-		*hashes = NULL;
-		return -1;
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "CRCCACHE-ENCODE Unsupported header version, %d",*version);
+		rslt = -1;
 	}
 	if (*file_size == 0)
 	{
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE no file size reported in header");
+		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "CRCCACHE-ENCODE no file size reported in header");
+		rslt = -1;
+	}
+	if (rslt != 0 && *hashes != NULL)
+	{
 		free(*hashes);
 		*hashes = NULL;
-		return -1;
 	}
-	return 0;
+	return rslt;
 }
 
 static int crccache_server_header_parser_handler(request_rec *r) {
@@ -289,10 +308,10 @@ static int crccache_server_header_parser_handler(request_rec *r) {
 			int version;
 			size_t file_size;
 			char * hashes;
-			if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
+			if (decode_if_block_header(r,header,&version,&file_size,&hashes) < 0)
 			{
 				// failed to decode if block header so only put the Capability header in the response
-				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Failed to decode block header (%s:%s)",BLOCK_HEADER, header);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Failed to decode block header (%s: %s)",BLOCK_HEADER, header);
 				ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE Enabling crccache_out_filter to set Capability and Crcsync-Similar header only");
 				ap_add_output_filter_handle(crccache_out_filter_handle, ctx, r, r->connection);
 				return OK;
@@ -751,7 +770,9 @@ static apr_status_t process_eos(ap_filter_t *f)
 	EVP_DigestFinal_ex(&ctx->mdctx, md_value, &md_len);
 	EVP_MD_CTX_cleanup(&ctx->mdctx);
 	write_hash(f, md_value, md_len);
-
+	//unsigned char sha1_value[APR_SHA1_DIGESTSIZE];
+	//apr_sha1_final(sha1_value, &ctx->sha1_ctx);
+	//write_hash(f, sha1_value, APR_SHA1_DIGESTSIZE);
 	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
 		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu) for uri %s",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length, f->r->unparsed_uri);
 
@@ -777,6 +798,7 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 	ctx->orig_length += len;
 	// update our sha1 hash
 	EVP_DigestUpdate(&ctx->mdctx, data, len);
+	//apr_sha1_update_binary(&ctx->sha1_ctx, (const unsigned char *)data, len);
 	// ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE normal data in APR bucket, read %ld", len);
 
 	// append data to the buffer and encode buffer content using the crc_read_block magic
@@ -957,7 +979,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		int version;
 		size_t file_size;
 		char * hashes;
-		if (decode_if_block_header(header,&version,&file_size,&hashes) < 0)
+		if (decode_if_block_header(r,header,&version,&file_size,&hashes) < 0)
 		{
 			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,"crccache: failed to decode if-block header");
 			ap_remove_output_filter(f);
@@ -1034,6 +1056,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		EVP_MD_CTX_init(&ctx->mdctx);
 		const EVP_MD *md = EVP_sha1();
 		EVP_DigestInit_ex(&ctx->mdctx, md, NULL);
+		//apr_sha1_init(&ctx->sha1_ctx);
 
 		// now initialise the crcsync context that will do the real work
 		ctx->crcctx = crc_context_new(ctx->block_size, HASH_SIZE,ctx->hashes, block_count_including_final_block, ctx->tail_block_size);
