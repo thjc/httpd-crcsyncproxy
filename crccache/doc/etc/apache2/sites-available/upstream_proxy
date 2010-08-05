@@ -7,8 +7,8 @@
 
 	CRCcacheServer On
 	DecoderModule INFLATE:gzip,x-gzip
-.       AddSimilarPageRegEx http://slashdot.org/.*
-.       AddSimilarPageRegEx http://tweakers.net/.*
+.       AddSimilarPageRegEx text/*;http://[^.]*.?slashdot.org/.*
+.       AddSimilarPageRegEx text/*;http://tweakers.net/.*
 
 	ProxyRequests On
 	ProxyVia On
