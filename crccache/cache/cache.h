@@ -18,8 +18,8 @@
 #include <httpd.h>
 
 /* cache info information */
-typedef struct cache_info cache_info;
-struct cache_info {
+typedef struct cache_info_s cache_info_t;
+struct cache_info_s {
     /**
      * HTTP status code of the cached entity. Though not neccessarily the
      * status code finally issued to the request.
@@ -36,6 +36,8 @@ struct cache_info {
     apr_time_t request_time;
     /** apr_time_now() at the time the entity was acutally cached */
     apr_time_t response_time;
+    
+    const char *uri; // Canonilized URI
 };
 
 
@@ -49,7 +51,7 @@ typedef struct cache_object cache_object_t;
 struct cache_object {
     const char *key;
     cache_object_t *next;
-    cache_info info;
+    cache_info_t info;
     /* Opaque portion (specific to the implementation) of the cache object */
     void *vobj;
     /* FIXME: These are only required for mod_mem_cache. */
@@ -137,8 +139,8 @@ typedef struct {
     apr_off_t saved_size;               /* length of saved_brigade */
     apr_time_t exp;                     /* expiration */
     apr_time_t lastmod;                 /* last-modified time */
-    cache_info *info;                   /* current cache info */
-    ap_filter_t *remove_url_filter;     /* Enable us to remove the filter */
+    cache_info_t *info;                   /* current cache info */
+    // ap_filter_t *remove_url_filter;     /* Enable us to remove the filter */
     char *key;                          /* The cache key created for this
                                          * request
                                          */
@@ -178,7 +180,7 @@ typedef struct {
 
 /* cache_util.c */
 /* do a HTTP/1.1 age calculation */
-CACHE_DECLARE(apr_time_t) ap_cache_current_age(cache_info *info, const apr_time_t age_value,
+CACHE_DECLARE(apr_time_t) ap_cache_current_age(cache_info_t *info, const apr_time_t age_value,
                                                apr_time_t now);
 
 /**
@@ -257,9 +259,9 @@ const char* cache_create_key( request_rec*r );
 /* Forward declarations */
 int remove_entity(cache_handle_t *h);
 apr_status_t store_headers(cache_handle_t *h, request_rec *r,
-		cache_info *i);
+		cache_info_t *i);
 apr_status_t store_body(cache_handle_t *h, request_rec *r,
-		apr_bucket_brigade *b);
+		apr_bucket_brigade *b, void (*post_store_body_callback)(disk_cache_object_t *dobj, request_rec *r));
 apr_status_t recall_headers(cache_handle_t *h, request_rec *r);
 apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p,
 		apr_bucket_brigade *bb);
@@ -269,7 +271,8 @@ apr_status_t read_array(request_rec *r, apr_array_header_t* arr,
 int create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len);
 int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 
-apr_status_t read_table(cache_handle_t *handle, request_rec *r, apr_table_t *table, apr_file_t *file);
+apr_status_t read_table(/*cache_handle_t *handle, request_rec *r, */server_rec *s, apr_table_t *table, apr_file_t *file);
+int file_cache_recall_mydata(apr_pool_t *ptemp, apr_file_t *fd, cache_info_t *info, disk_cache_object_t *dobj, /*request_rec *r, */int validate_url);
 
 
 #endif /* CACHE_H_ */

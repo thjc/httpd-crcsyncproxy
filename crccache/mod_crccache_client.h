@@ -14,52 +14,9 @@
 #include <http_config.h>
 #include <apr_optional.h>
 #include <apr_sha1.h>
+#include "mod_crccache_client_find_similar.h"
 
 extern module AP_MODULE_DECLARE_DATA crccache_client_module;
-
-const char* cache_create_key( request_rec*r );
-
-APR_DECLARE_OPTIONAL_FN(apr_status_t,
-                        ap_cache_generate_key,
-                        (request_rec *r, apr_pool_t*p, char**key ));
-
-extern APR_OPTIONAL_FN_TYPE(ap_cache_generate_key) *cache_generate_key;
-
-
-// hashes per file
-#define FULL_BLOCK_COUNT 40
-
-typedef enum decoding_state {
-	DECODING_NEW_SECTION,
-	DECODING_COMPRESSED,
-	DECODING_LITERAL_BODY,
-	DECODING_LITERAL_SIZE,
-	DECODING_HASH,
-	DECODING_BLOCK_HEADER,
-	DECODING_BLOCK
-} decoding_state;
-
-typedef enum {
-	DECOMPRESSION_INITIALIZED,
-	DECOMPRESSION_ENDED
-} decompression_state_t;
-
-typedef struct crccache_client_ctx_t {
-	apr_bucket_brigade *bb;
-	size_t block_size;
-	size_t tail_block_size;
-	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
-
-	decoding_state state;
-	decompression_state_t decompression_state;
-	z_stream *decompression_stream;
-	int headers_checked;
-	struct apr_sha1_ctx_t sha1_ctx;
-	unsigned char sha1_value_rx[APR_SHA1_DIGESTSIZE];
-	unsigned rx_count;
-	unsigned literal_size;
-	unsigned char * partial_literal;// original data so we can fill in the matched blocks
-} crccache_client_ctx;
 
 struct cache_enable {
     apr_uri_t url;
@@ -71,6 +28,7 @@ struct cache_disable {
     apr_uri_t url;
     apr_size_t pathlen;
 };
+
 
 /* static information about the local cache */
 typedef struct {
@@ -85,6 +43,8 @@ typedef struct {
     int dirlength;               /* Length of subdirectory names */
     apr_off_t minfs;             /* minimum file size for cached files */
     apr_off_t maxfs;             /* maximum file size for cached files */
+
+    similar_page_cache_t *similar_page_cache;
 } crccache_client_conf;
 
 #endif /*MOD_CRCCACHE_CLIENT_H*/

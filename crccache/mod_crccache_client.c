@@ -32,12 +32,14 @@
 #include <assert.h>
 
 #include <apr_file_io.h>
+#include <apr_file_info.h>
 #include <apr_strings.h>
 #include <apr_base64.h>
 #include <apr_lib.h>
 #include <apr_date.h>
 #include <apr_tables.h>
 #include "ap_provider.h"
+#include <ap_regex.h>
 #include "util_filter.h"
 #include "util_script.h"
 #include "util_charset.h"
@@ -45,32 +47,148 @@
 #include <http_protocol.h>
 
 #include "crccache.h"
-#include "ap_wrapper.h"
+#include "ap_log_helper.h"
 #include <crcsync/crcsync.h>
 #include <crc/crc.h>
 #include <zlib.h>
 
 #include "mod_crccache_client.h"
+#include "mod_crccache_client_find_similar.h"
 
 static ap_filter_rec_t *crccache_decode_filter_handle;
 static ap_filter_rec_t *cache_save_filter_handle;
 static ap_filter_rec_t *cache_save_subreq_filter_handle;
 
 module AP_MODULE_DECLARE_DATA crccache_client_module;
+
+
+APR_DECLARE_OPTIONAL_FN(apr_status_t,
+                        ap_cache_generate_key,
+                        (request_rec *r, apr_pool_t*p, char**key ));
 APR_OPTIONAL_FN_TYPE(ap_cache_generate_key) *cache_generate_key;
 
+// const char* cache_create_key( request_rec*r );
+
+
+// extern APR_OPTIONAL_FN_TYPE(ap_cache_generate_key) *cache_generate_key;
+
+/*
+ * Private strucures and constants only used in mod_crccache_client
+ */
+
+// hashes per file
+#define FULL_BLOCK_COUNT 40
+
+typedef enum decoding_state {
+	DECODING_NEW_SECTION,
+	DECODING_COMPRESSED,
+	DECODING_LITERAL_BODY,
+	DECODING_LITERAL_SIZE,
+	DECODING_HASH,
+	DECODING_BLOCK_HEADER,
+	DECODING_BLOCK
+} decoding_state;
+
+typedef enum {
+	DECOMPRESSION_INITIALIZED,
+	DECOMPRESSION_ENDED
+} decompression_state_t;
+
+typedef struct crccache_client_ctx_t {
+	apr_bucket_brigade *bb;
+	size_t block_size;
+	size_t tail_block_size;
+	apr_bucket * cached_bucket;// original data so we can fill in the matched blocks
+
+	decoding_state state;
+	decompression_state_t decompression_state;
+	z_stream *decompression_stream;
+	int headers_checked;
+	struct apr_sha1_ctx_t sha1_ctx;
+	unsigned char sha1_value_rx[APR_SHA1_DIGESTSIZE];
+	unsigned rx_count;
+	unsigned literal_size;
+	unsigned char * partial_literal;// original data so we can fill in the matched blocks
+} crccache_client_ctx;
+
+static int crccache_client_post_config_per_virtual_host(apr_pool_t *p, apr_pool_t *plog,
+        apr_pool_t *ptemp, server_rec *s)
+{
+	/**
+     * The cache can be configured (differently) per virtual host, hence make the correct settings
+     * at the virtual host level 
+     */
+    crccache_client_conf *conf = ap_get_module_config(s->module_config,
+                                                 &crccache_client_module);
+    ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, s,
+                 "mod_crccache_client.post_config_per_vhost (%s): Number of cacheable URLs: %d", 
+                 format_hostinfo(ptemp, s), conf->cacheenable->nelts);
+
+    if (conf->cacheenable->nelts != 0) {
+    	// Cache client is enabled in this (virtual) server. Initialize it
+        if (!conf->cache_root) {
+            ap_log_error(APLOG_MARK, APLOG_ERR, APR_EGENERAL, s,
+                         "mod_crccache_client.post_config_per_vhost (%s): Please set parameter CacheRootClient in (virtual) server config %s",
+                         format_hostinfo(ptemp, s), s->defn_name);
+            return APR_EGENERAL;
+        }
+    	return crccache_client_fsp_post_config_per_virtual_host(p, plog, ptemp, s, conf->similar_page_cache, conf->cache_root);
+    }
+    
+    return OK;
+}
 
 static int crccache_client_post_config(apr_pool_t *p, apr_pool_t *plog,
                              apr_pool_t *ptemp, server_rec *s)
 {
-    /* This is the means by which unusual (non-unix) os's may find alternate
-     * means to run a given command (e.g. shebang/registry parsing on Win32)
+	int result;
+	
+    /*
+     * TODO: AW: Why is the cache_generate_key function looked-up as an optional function?
+     * As far as I can see, this function is:
+     * 1) Very platform agnostic (so the need to ever write a platform specific module
+     *    in order to export a platform specific implementation hardly exists...)
+     * 2) Very closely coupled to the way it is used in the cache client (an externally
+     *    exported function could break the client by implementing other semantics!)
+     * 3) There are no existing modules registering/exporting an ap_cache_generate_key function
+     *    (which confirmes the two above points, that there is no need for it)
+     * Nevertheless, I assume the original author of mod_cache knows what he is doing so I
+     * leave this indirect look-up here for the time being
      */
     cache_generate_key = APR_RETRIEVE_OPTIONAL_FN(ap_cache_generate_key);
     if (!cache_generate_key) {
         cache_generate_key = cache_generate_key_default;
     }
+
+    // Perform the post_config logic for the 'find similar page' feature
+    server_rec *current_server = s;
+    while (current_server != NULL)
+    {
+    	result = crccache_client_post_config_per_virtual_host(p, plog, ptemp, current_server);
+    	if (result != OK)
+    		return result;
+
+	    current_server = current_server->next;
+    }
     return OK;
+
+}
+
+static void crccache_client_child_init_per_virtual_host(apr_pool_t *p, server_rec *s)
+{
+    crccache_client_conf *conf = ap_get_module_config(s->module_config,
+                                                 &crccache_client_module);
+    crccache_client_fsp_child_init_per_virtual_host(p, s, conf->similar_page_cache);
+}
+
+static void crccache_client_child_init(apr_pool_t *p, server_rec *s)
+{
+	server_rec *current_server = s;
+	while (current_server != NULL)
+	{
+		crccache_client_child_init_per_virtual_host(p, current_server);
+	    current_server = current_server->next;
+	}
 }
 
 
@@ -93,6 +211,135 @@ apr_status_t deflate_ctx_cleanup(void *data)
 	return APR_SUCCESS;
 }
 
+// ______ continue with refactoring
+
+/**
+ * Request CRCSYNC/delta-http encoding for a page: open the previous data file from the cache, preferably
+ * for the exact URL but if not present then for a similar URL. Then calculate the CRC blocks for the
+ * opened page and generate the header
+ * Returns APR_SUCCESS if the delta-http could be prepared and APR_EGENERAL or APR_NOTFOUND in case of
+ * error conditions (APR_NOTFOUND if no body could be found, APR_EGENERAL for all other errors)
+ */
+static apr_status_t request_crcsync_encoding(cache_handle_t *h, request_rec *r, crccache_client_conf *client_conf)	
+{
+	const char *data;
+	apr_size_t len;
+	apr_bucket *e;
+	unsigned i;
+	int z_RC;
+
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, "Preparing CRCSYNC/delta-http for %s", r->unparsed_uri);
+	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
+	if (!dobj->fd)
+	{
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, 
+				"No page found in cache for requested URL. Trying to find page for similar URLs");
+		dobj = apr_palloc(r->pool, sizeof(disk_cache_object_t));
+		if (find_similar_page(dobj, r, client_conf->similar_page_cache) != APR_SUCCESS) 
+		{
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, 
+					"Failed to prepare CRCSYNC/delta-http. No (similar) page found in cache");
+			return APR_NOTFOUND;
+		}
+	}
+	
+	e = apr_bucket_file_create(dobj->fd, 0, (apr_size_t) dobj->file_size, r->pool,
+			r->connection->bucket_alloc);
+
+	/* Read file into bucket. Hopefully the entire file fits in the bucket */
+	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
+	if (len != dobj->file_size)
+	{
+		ap_log_error(APLOG_MARK, APLOG_WARNING, APR_SUCCESS, r->server,
+				"crccache_client: Only read %" APR_SIZE_T_FMT " bytes out of %" APR_SIZE_T_FMT " bytes from the "
+				"original response data into the bucket cache", 
+				len, dobj->file_size);
+		return APR_EGENERAL;
+	}
+	// this will be rounded down, but thats okay
+	size_t blocksize = len/FULL_BLOCK_COUNT;
+	size_t tail_block_size = blocksize + len % FULL_BLOCK_COUNT;
+	size_t block_count_including_final_block = FULL_BLOCK_COUNT;
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server, 
+			"Read file into bucket, len: %" APR_SIZE_T_FMT ", blocksize: %" APR_SIZE_T_FMT ", tail_block_size: %" APR_SIZE_T_FMT,
+			len, blocksize, tail_block_size);
+	
+	// sanity check for very small files
+	if (blocksize <= 4)
+	{
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,	"Skipped CRCSYNC/delta-http, due to too small blocksize");
+		return APR_SUCCESS;
+	}
+	
+	crccache_client_ctx * ctx;
+	ctx = apr_pcalloc(r->pool, sizeof(*ctx));
+	ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+	ctx->block_size = blocksize;
+	ctx->tail_block_size = tail_block_size;
+	ctx->state = DECODING_NEW_SECTION;
+	ctx->cached_bucket = e;
+
+	// Setup inflate for decompressing non-matched literal data
+	ctx->decompression_stream = apr_palloc(r->pool, sizeof(*(ctx->decompression_stream)));
+	ctx->decompression_stream->zalloc = Z_NULL;
+	ctx->decompression_stream->zfree = Z_NULL;
+	ctx->decompression_stream->opaque = Z_NULL;
+	ctx->decompression_stream->avail_in = 0;
+	ctx->decompression_stream->next_in = Z_NULL;
+	z_RC = inflateInit(ctx->decompression_stream);
+	if (z_RC != Z_OK)
+	{
+		ap_log_error(APLOG_MARK, APLOG_WARNING, 0, r->server,
+		"Can not initialize decompression engine, return code: %d", z_RC);
+		return APR_EGENERAL;
+	}
+	ctx->decompression_state = DECOMPRESSION_INITIALIZED;
+
+	// Register a cleanup function to cleanup internal libz resources
+	apr_pool_cleanup_register(r->pool, ctx, deflate_ctx_cleanup,
+                              apr_pool_cleanup_null);
+
+	// All OK to go for the crcsync decoding: add the headers
+	// and set-up the decoding filter
+
+	// add one for base 64 overflow and null terminator
+	char hash_set[HASH_HEADER_SIZE+1];
+
+	uint64_t crcs[block_count_including_final_block];
+	crc_of_blocks(data, len, blocksize, tail_block_size, HASH_SIZE, crcs);
+
+	// swap to network byte order
+	for (i = 0; i < block_count_including_final_block;++i)
+	{
+		htobe64(crcs[i]);
+	}
+
+	apr_base64_encode (hash_set, (char *)crcs, block_count_including_final_block*sizeof(crcs[0]));
+	hash_set[HASH_HEADER_SIZE] = '\0';
+	//apr_bucket_delete(e);
+
+	// TODO; bit of a safety margin here, could calculate exact size
+	const int block_header_max_size = HASH_HEADER_SIZE+40;
+	char block_header_txt[block_header_max_size];
+	apr_snprintf(block_header_txt, block_header_max_size,"v=1; fs=%" APR_SIZE_T_FMT "; h=%s",len,hash_set);
+	apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
+	// TODO: do we want to cache the hashes here?
+
+	// initialise the context for our sha1 digest of the unencoded response
+	apr_sha1_init(&ctx->sha1_ctx);
+	
+	// we want to add a filter here so that we can decode the response.
+	// we need access to the original cached data when we get the response as
+	// we need that to fill in the matched blocks.
+	// TODO: does the original cached data file remain open between this request
+	//        and the subsequent response or do we run the risk that a concurrent
+	//        request modifies it?
+	ap_add_output_filter_handle(crccache_decode_filter_handle, ctx, r, r->connection);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,	"Successfully prepared CRCSYNC/delta-http");
+
+	return APR_SUCCESS;
+}
+
 
 /*
  * Reads headers from a buffer and returns an array of headers.
@@ -102,12 +349,6 @@ apr_status_t deflate_ctx_cleanup(void *data)
  * Is that okay, or should they be collapsed where possible?
  */
 apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
-	const char *data;
-	apr_size_t len;
-	apr_bucket *e;
-	unsigned i;
-	int z_RC;
-
 	disk_cache_object_t *dobj = (disk_cache_object_t *) h->cache_obj->vobj;
 
 	/* This case should not happen... */
@@ -120,108 +361,23 @@ apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 	h->resp_hdrs = apr_table_make(r->pool, 20);
 
 	/* Call routine to read the header lines/status line */
-	read_table(h, r, h->resp_hdrs, dobj->hfd);
-	read_table(h, r, h->req_hdrs, dobj->hfd);
+	read_table(/*h, r, */r->server, h->resp_hdrs, dobj->hfd);
+	read_table(/*h, r, */r->server, h->req_hdrs, dobj->hfd);
+	apr_file_close(dobj->hfd);
 
-	e = apr_bucket_file_create(dobj->fd, 0, (apr_size_t) dobj->file_size, r->pool,
-	r->connection->bucket_alloc);
-
-	/* read */
-	apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
-
-	// this will be rounded down, but thats okay
-	size_t blocksize = len/FULL_BLOCK_COUNT;
-	size_t tail_block_size = blocksize + len % FULL_BLOCK_COUNT;
-	size_t block_count_including_final_block = FULL_BLOCK_COUNT;
-	// sanity check for very small files
-	if (blocksize> 4)
-	{
-		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"crccache: %d blocks of %ld bytes, one block of %ld bytes",FULL_BLOCK_COUNT-1,blocksize,tail_block_size);
-
-		crccache_client_ctx * ctx;
-		ctx = apr_pcalloc(r->pool, sizeof(*ctx));
-		ctx->bb = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-		ctx->block_size = blocksize;
-		ctx->tail_block_size = tail_block_size;
-		ctx->state = DECODING_NEW_SECTION;
-		ctx->cached_bucket = e;
-
-		// Setup inflate for decompressing non-matched literal data
-		ctx->decompression_stream = apr_palloc(r->pool, sizeof(*(ctx->decompression_stream)));
-		ctx->decompression_stream->zalloc = Z_NULL;
-		ctx->decompression_stream->zfree = Z_NULL;
-		ctx->decompression_stream->opaque = Z_NULL;
-		ctx->decompression_stream->avail_in = 0;
-		ctx->decompression_stream->next_in = Z_NULL;
-		z_RC = inflateInit(ctx->decompression_stream);
-		if (z_RC != Z_OK)
-		{
-			ap_log_error(APLOG_MARK, APLOG_WARNING, 0, r->server,
-			"Can not initialize decompression engine, return code: %d", z_RC);
-			return APR_SUCCESS;
-		}
-		ctx->decompression_state = DECOMPRESSION_INITIALIZED;
-
-		// Register a cleanup function to cleanup internal libz resources
-		apr_pool_cleanup_register(r->pool, ctx, deflate_ctx_cleanup,
-                                  apr_pool_cleanup_null);
-
-		// All OK to go for the crcsync decoding: add the headers
-		// and set-up the decoding filter
-
-		// add one for base 64 overflow and null terminator
-		char hash_set[HASH_HEADER_SIZE+1];
-
-		uint64_t crcs[block_count_including_final_block];
-		crc_of_blocks(data, len, blocksize, HASH_SIZE, true, crcs);
-
-		// swap to network byte order
-		for (i = 0; i < block_count_including_final_block;++i)
-		{
-			htobe64(crcs[i]);
-		}
-
-		apr_base64_encode (hash_set, (char *)crcs, block_count_including_final_block*sizeof(crcs[0]));
-		hash_set[HASH_HEADER_SIZE] = '\0';
-		//apr_bucket_delete(e);
-
-		// TODO; bit of a safety margin here, could calculate exact size
-		const int block_header_max_size = HASH_HEADER_SIZE+40;
-		char block_header_txt[block_header_max_size];
-		snprintf(block_header_txt, block_header_max_size,"v=1; fs=%zu; h=%s",len,hash_set);
-		apr_table_set(r->headers_in, BLOCK_HEADER, block_header_txt);
-		// TODO: do we want to cache the hashes here?
-
-		// initialise the context for our sha1 digest of the unencoded response
-		apr_sha1_init(&ctx->sha1_ctx);
-		
-		// we want to add a filter here so that we can decode the response.
-		// we need access to the original cached data when we get the response as
-		// we need that to fill in the matched blocks.
-		// TODO: does the original cached data file remain open between this request
-		//        and the subsequent response or do we run the risk that a concurrent
-		//        request modifies it?
-		ap_add_output_filter_handle(crccache_decode_filter_handle,
-		ctx, r, r->connection);
-
-		// TODO: why is hfd file only closed in this case?
-		apr_file_close(dobj->hfd);
-	}
 	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
-	"crccache_client: Recalled headers for URL %s", dobj->name);
+			"crccache_client: Recalled headers for URL %s", dobj->name);
 	return APR_SUCCESS;
 }
 
 /*
  * CACHE_DECODE filter
  * ----------------
- *
- * Deliver cached content (headers and body) up the stack.
+ * Deliver crc decoded content (headers and body) up the stack.
  */
 static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 	apr_bucket *e;
 	request_rec *r = f->r;
-	// TODO: set up context type struct
 	crccache_client_ctx *ctx = f->ctx;
 
 	// if this is the first pass in decoding we should check the headers etc
@@ -320,13 +476,13 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			apr_sha1_final(sha1_value, &ctx->sha1_ctx);
 			if (memcmp(sha1_value, ctx->sha1_value_rx, APR_SHA1_DIGESTSIZE) != 0)
 			{
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED for uri %s", r->unparsed_uri);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK FAILED for uri %s", r->unparsed_uri);
 				apr_brigade_cleanup(bb);
 				return APR_EGENERAL;
 			}
 			else
 			{
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK PASSED for uri %s", r->unparsed_uri);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE HASH CHECK PASSED for uri %s", r->unparsed_uri);
 			}
 
 			/* Okay, we've seen the EOS.
@@ -360,12 +516,12 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 		/* read */
 		apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
-		//ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE read %zd bytes",len);
+		//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE read %" APR_SIZE_T_FMT " bytes",len);
 
 		apr_size_t consumed_bytes = 0;
 		while (consumed_bytes < len)
 		{
-			//ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE remaining %zd bytes",len - consumed_bytes);
+			//ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCSYNC-DECODE remaining %" APR_SIZE_T_FMT " bytes",len - consumed_bytes);
 			// no guaruntee that our buckets line up with our encoding sections
 			// so we need a processing state machine stored in our context
 			switch (ctx->state)
@@ -407,8 +563,8 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 
 					// TODO: Output the indicated block here
 					size_t current_block_size = block_number < FULL_BLOCK_COUNT-1 ? ctx->block_size : ctx->tail_block_size;
-					ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-							"CRCSYNC-DECODE block section, block %d, size %zu" ,block_number, current_block_size);
+					ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+							"CRCSYNC-DECODE block section, block %d, size %" APR_SIZE_T_FMT, block_number, current_block_size);
 
 					char * buf = apr_palloc(r->pool, current_block_size);
 					const char * source_data;
@@ -547,6 +703,11 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 }
 
 static void *crccache_client_create_config(apr_pool_t *p, server_rec *s) {
+    ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, s,
+                 "mod_crccache_client: entering crccache_client_create_config (%s)", 
+                 format_hostinfo(p, s));
+
+	
 	crccache_client_conf *conf = apr_pcalloc(p, sizeof(crccache_client_conf));
     /* array of URL prefixes for which caching is enabled */
     conf->cacheenable = apr_array_make(p, 10, sizeof(struct cache_enable));
@@ -560,7 +721,11 @@ static void *crccache_client_create_config(apr_pool_t *p, server_rec *s) {
 	conf->minfs = DEFAULT_MIN_FILE_SIZE;
 
 	conf->cache_root = NULL;
-	conf->cache_root_len = 0;
+	// apr_pcalloc has already initialized everyting to 0
+	// conf->cache_root_len = 0;
+
+	// TODO: ____ rename once it works
+	conf->similar_page_cache = create_similar_page_cache(p);
 
 	return conf;
 }
@@ -656,14 +821,25 @@ static const char *add_crc_client_enable(cmd_parms *parms, void *dummy,
     return NULL;
 }
 
+static const char *set_cache_bytes(cmd_parms *parms, void *in_struct_ptr,
+		const char *arg) {
+	crccache_client_conf *conf = ap_get_module_config(parms->server->module_config,
+			&crccache_client_module);
+	return crccache_client_fsp_set_cache_bytes(parms, in_struct_ptr, arg, conf->similar_page_cache);
+}
+
 static const command_rec crccache_client_cmds[] =
 {
-    AP_INIT_TAKE1("CRCClientEnable", add_crc_client_enable, NULL, RSRC_CONF, "A cache type and partial URL prefix below which caching is enabled"),
+    AP_INIT_TAKE1("CRCClientEnable", add_crc_client_enable, NULL, RSRC_CONF, "A partial URL prefix below which caching is enabled"),
 	AP_INIT_TAKE1("CacheRootClient", set_cache_root, NULL, RSRC_CONF,"The directory to store cache files"),
 	AP_INIT_TAKE1("CacheDirLevelsClient", set_cache_dirlevels, NULL, RSRC_CONF, "The number of levels of subdirectories in the cache"),
 	AP_INIT_TAKE1("CacheDirLengthClient", set_cache_dirlength, NULL, RSRC_CONF, "The number of characters in subdirectory names"),
 	AP_INIT_TAKE1("CacheMinFileSizeClient", set_cache_minfs, NULL, RSRC_CONF, "The minimum file size to cache a document"),
 	AP_INIT_TAKE1("CacheMaxFileSizeClient", set_cache_maxfs, NULL, RSRC_CONF, "The maximum file size to cache a document"),
+	AP_INIT_TAKE1("CRCClientSharedCacheSize", set_cache_bytes, NULL, RSRC_CONF, "Set the size of the shared memory cache (in bytes). Use 0 "
+			"to disable the shared memory cache. (default: 10MB). "
+			"Disabling the shared memory cache prevents the cache client from using a similar page as base for the delta-request "
+			"when an exact match (on the URL) can not be found in the cache"),
 	{ NULL }
 };
 
@@ -738,22 +914,36 @@ int crccache_client_url_handler(request_rec *r, int lookup)
         return DECLINED;
     }
     h = apr_palloc(r->pool, sizeof(cache_handle_t));
-    if (open_entity(h, r, key) != OK)
+    if (open_entity(h, r, key) == OK)
+    {
+    	if (recall_headers(h, r) == APR_SUCCESS) {
+    		cache->handle = h;
+    	}
+    	else {
+    		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
+    					 r->server, "Failed to recall headers");
+    	}
+    	
+    }
+    else
     {
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
-					 r->server, "Failed to open entity not good");
-    	return DECLINED;
+					 r->server, "Failed to open entity");
     }
-	if (recall_headers(h, r) != APR_SUCCESS) {
-		/* TODO: Handle this error */
+    if (request_crcsync_encoding(h, r, conf) != APR_SUCCESS) {
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS,
-					 r->server, "Failed to recall headers");
-		return DECLINED;
-	}
-	cache->handle = h;
+					 r->server, "Failed to request CRCSYNC/delta-http encoding");
+    }
     return DECLINED;
 }
 
+void post_store_body_callback(disk_cache_object_t *dobj, request_rec *r)
+{
+	// ____ 
+	crccache_client_conf *conf = (crccache_client_conf *) ap_get_module_config(r->server->module_config,
+                                                      &crccache_client_module);
+	update_or_add_similar_page(dobj, r, conf->similar_page_cache);
+}
 
 
 /*
@@ -771,7 +961,6 @@ int crccache_client_url_handler(request_rec *r, int lookup)
  *        If we can, call cache_create_entity() and save the headers and body
  *   Finally, pass the data to the next filter (the network or whatever)
  */
-
 int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
 {
     int rv = !OK;
@@ -783,7 +972,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     const char *exps, /* *lastmods,*/ *dates;//, *etag;
     apr_time_t exp, date,/* lastmod,*/ now;
     apr_off_t size;
-    cache_info *info = NULL;
+    cache_info_t *info = NULL;
     char *reason;
     apr_pool_t *p;
 
@@ -796,6 +985,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     if (!cache) {
         /* user likely configured CACHE_SAVE manually; they should really use
          * mod_cache configuration to do that
+         * TODO: Don't support this situation. In stead, write a WARNING to the log and abort the filter processing
          */
         cache = apr_pcalloc(r->pool, sizeof(cache_request_rec));
         ap_set_module_config(r->request_config, &crccache_client_module, cache);
@@ -823,7 +1013,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         /* pass the brigades into the cache, then pass them
          * up the filter stack
          */
-        rv = store_body(cache->handle, r, in);
+        rv = store_body(cache->handle, r, in, &post_store_body_callback);
         if (rv != APR_SUCCESS) {
             ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
                          "cache: Cache provider's store_body failed!");
@@ -1002,7 +1192,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
             return rv;
         }
         cache->handle = h;
-        info = apr_pcalloc(r->pool, sizeof(cache_info));
+        info = apr_pcalloc(r->pool, sizeof(cache_info_t));
         /* We only set info->status upon the initial creation. */
         info->status = r->status;
     }
@@ -1021,7 +1211,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
      */
     ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
                  "cache: Removing CACHE_REMOVE_URL filter.");
-    //ap_remove_output_filter(cache->remove_url_filter);
+    // ap_remove_output_filter(cache->remove_url_filter);
 
     /*
      * We now want to update the cache file header information with
@@ -1098,7 +1288,7 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         return ap_pass_brigade(f->next, in);
     }
 
-    rv = store_body(cache->handle, r, in);
+    rv = store_body(cache->handle, r, in, &post_store_body_callback);
     if (rv != APR_SUCCESS) {
         ap_log_error(APLOG_MARK, APLOG_DEBUG, rv, r->server,
                      "cache: store_body failed");
@@ -1109,14 +1299,25 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
 }
 
 static void crccache_client_register_hook(apr_pool_t *p) {
-	ap_log_error(APLOG_MARK, APLOG_INFO, 0, NULL,
+	ap_log_error(APLOG_MARK, APLOG_INFO, APR_SUCCESS, NULL,
 			"Registering crccache client module, (C) 2009, Toby Collett");
 
     /* cache initializer */
 	ap_hook_post_config(crccache_client_post_config, NULL, NULL, APR_HOOK_REALLY_FIRST);
     /* cache handler */
     ap_hook_quick_handler(crccache_client_url_handler, NULL, NULL, APR_HOOK_FIRST);
-    /* cache filters
+    /* child initializer */
+    ap_hook_child_init(crccache_client_child_init, NULL, NULL, APR_HOOK_REALLY_FIRST);
+    
+	/*
+	 * CRCCACHE_DECODE must go into the filter chain before the cache save filter,
+	 * so that the cache saves the decoded response
+	 */
+	crccache_decode_filter_handle = ap_register_output_filter(
+			"CRCCACHE_DECODE", crccache_decode_filter, NULL,
+			AP_FTYPE_CONTENT_SET);
+
+	/* cache filters
      * XXX The cache filters need to run right after the handlers and before
      * any other filters. Consider creating AP_FTYPE_CACHE for this purpose.
      *
@@ -1153,24 +1354,14 @@ static void crccache_client_register_hook(apr_pool_t *p) {
                                   cache_save_filter,
                                   NULL,
                                   AP_FTYPE_CONTENT_SET-1);
-	/*
-	 * CRCCACHE_DECODE must go into the filter chain after a possible DEFLATE
-	 * filter to ensure that already compressed cache objects do not
-	 * get compressed again. Incrementing filter type by 1 ensures
-	 * his happens.
-	 */
-	crccache_decode_filter_handle = ap_register_output_filter(
-			"CRCCACHE_DECODE", crccache_decode_filter, NULL,
-			AP_FTYPE_CONTENT_SET + 1);
-
-
 }
 
 module AP_MODULE_DECLARE_DATA crccache_client_module = {
-		STANDARD20_MODULE_STUFF, NULL, /* create per-directory config structure */
-		NULL ,                       /* merge per-directory config structures */
+		STANDARD20_MODULE_STUFF, 
+		NULL, /* create per-directory config structure */
+		NULL,                       /* merge per-directory config structures */
 		crccache_client_create_config, /* create per-server config structure */
-		NULL		, /* merge per-server config structures */
+		NULL, /* merge per-server config structures */
 		crccache_client_cmds, /* command apr_table_t */
 		crccache_client_register_hook /* register hooks */
 	};

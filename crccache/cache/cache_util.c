@@ -143,7 +143,7 @@ CACHE_DECLARE(cache_provider_list *)ap_cache_get_providers(request_rec *r,
 #endif
 
 /* do a HTTP/1.1 age calculation */
-CACHE_DECLARE(apr_int64_t) ap_cache_current_age(cache_info *info,
+CACHE_DECLARE(apr_int64_t) ap_cache_current_age(cache_info_t *info,
                                                 const apr_time_t age_value,
                                                 apr_time_t now)
 {

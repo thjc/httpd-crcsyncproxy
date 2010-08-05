@@ -40,7 +40,7 @@
 #include "util_charset.h"
 
 #include <http_log.h>
-#include "ap_wrapper.h"
+#include "ap_log_helper.h"
 
 #include "crccache.h"
 #include "mod_crccache_server.h"
@@ -57,6 +57,38 @@ typedef enum  {
 	COMPRESSION_FIRST_BLOCK_WRITTEN,
 	COMPRESSION_ENDED
 } compression_state_t;
+
+// Private structures
+typedef struct encodings_s encodings_t;
+struct encodings_s {
+	encodings_t *next;
+	const char *encoding;
+};
+
+typedef struct decoder_modules_s decoder_modules_t;
+struct decoder_modules_s {
+	decoder_modules_t *next;
+	const char *name;
+	encodings_t *encodings;
+};
+
+typedef struct regexs_s regexs_t;
+struct regexs_s {
+	regexs_t *next;
+	ap_regex_t *preg;
+	const char *regex;
+	encodings_t *mime_types;
+};
+
+/* Static information about the crccache server */
+typedef struct {
+	int enabled;
+	decoder_modules_t *decoder_modules;
+	unsigned decoder_modules_cnt;
+	regexs_t *regexs;
+	regexs_t *regexs_tail;
+} crccache_server_conf;
+
 
 static void *crccache_server_create_config(apr_pool_t *p, server_rec *s) {
 	crccache_server_conf *conf = apr_pcalloc(p, sizeof(crccache_server_conf));
@@ -123,20 +155,80 @@ static const char *add_crccache_similar_page_regex (cmd_parms *parms, void *in_s
 	regexs->preg = apr_palloc(parms->pool, sizeof(ap_regex_t));
 	if (regexs == NULL)
 	{
-		return "Out of memory exception while allocating regexs->preg structure";
+		return "Out of memory exception while allocating regexs->preg field";
 	}
-	regexs->regex = apr_pstrdup(parms->pool, arg);
-	if (regexs->regex == NULL)
+	char *parsed_arg = apr_pstrdup(parms->pool, arg);
+	if (parsed_arg == NULL)
 	{
-		return "Out of memory exception while allocating regexs->regex parameter";
+		return "Out of memory exception while allocating parsed_args field";
 	}
+	
+	char *separator = strstr(parsed_arg, ";"); // Find separator between mime-types and regex
+	if (separator == NULL) 
+	{
+		return "Can't find ; separator between mime-types and regular expression";
+	}
+	*separator++ = 0; // Null-terminate the mime-type(s) part of the string
+	while (*separator == ' ')
+	{
+		separator++; // skip any whitespace before the regex
+	}
+	if (*separator == 0) 
+	{
+		return "Found an empty regular expression after the ; separator";
+	}
+	regexs->regex = separator; // Regex starts here
 	// Compile the regular expression
-	int rslt = ap_regcomp(regexs->preg, arg, 0);
+	int rslt = ap_regcomp(regexs->preg, regexs->regex, 0);
 	if (rslt != 0)
 	{
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, NULL, "CRCCACHE-ENCODE ap_regcomp return code: %d", rslt);
-		return "Failure to compile regular expression";
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, parms->server, 
+				"CRCCACHE-ENCODE ap_regcomp return code: %d for regex %s", rslt, regexs->regex);
+		return "Failure to compile regular expression. See error log for further details";
 	}
+	
+	// Now start splitting the mime-types themselves into separate tokens
+	ap_regex_t *validate_mime_type_regex = apr_palloc(parms->pool, sizeof(ap_regex_t));
+	if (validate_mime_type_regex == NULL)
+	{
+		return "Out of memory exception while allocationg validate_mime_type_regex structure";
+	}
+	rslt = ap_regcomp(validate_mime_type_regex,
+			"^((\\*/\\*)|([^]()<>@,;:\\\"/[?.=* ]+/(\\*|[^]()<>@,;:\\\"/[?.=* ]+)))$", 0);
+	if (rslt != 0)
+	{
+		ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, parms->server, 
+				"CRCCACHE-ENCODE ap_regcomp return code: %d for validate_mime_type_regex", rslt);
+		return "Failure to compile regular expression. See error log for further details";
+	}
+	regexs->mime_types = NULL;
+	char *last;
+	char *token = apr_strtok(parsed_arg, ", ", &last);
+	while (token != NULL) 
+	{
+		if (ap_regexec(validate_mime_type_regex, token, 0, NULL, AP_REG_ICASE) != 0)
+		{
+			ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, parms->server, 
+					"CRCCACHE-ENCODE ap_regexec returned mismatch for mime-type %s", token);
+			return "Invalid mime-type format specified. See error log for further details";
+		}
+		encodings_t *mime_type = apr_palloc(parms->pool, sizeof(*mime_type));
+		if (mime_type == NULL)
+		{
+			return "Out of memory exception while allocationg mime_type structure";
+		}
+		mime_type->next = regexs->mime_types;
+		regexs->mime_types = mime_type;
+		// Store the wild-card mime-type (*/*) as a NULL pointer so that it can be quickly recognized
+		mime_type->encoding = (strcmp(token, "*/*") == 0) ? NULL : token;
+		token = apr_strtok(NULL, ", ", &last);
+	}
+	ap_regfree(validate_mime_type_regex); // Free the memory used by the mime type validation regex.
+	if (regexs->mime_types == NULL) 
+	{
+		return "Could not find any mime-types before the ; separator";
+	}
+	
 	// Add regular expression to the tail of the regular expressions list
 	regexs->next = NULL;
 	if (conf->regexs_tail == NULL)
@@ -222,7 +314,7 @@ static const command_rec crccache_server_cmds[] =
 {
 	AP_INIT_FLAG("CRCcacheServer", set_crccache_server, NULL, RSRC_CONF, "Enable the CRCCache server in this virtual server"),
 	AP_INIT_TAKE1("DecoderModule", set_crccache_decoder_module, NULL, RSRC_CONF, "DecoderModules to decode content-types (e.g. INFLATE:gzip,x-gzip)"),
-	AP_INIT_ITERATE("AddSimilarPageRegEx", add_crccache_similar_page_regex, NULL, RSRC_CONF, "Regular expression to indicate which pages are similar to each other"),
+	AP_INIT_ITERATE("AddSimilarPageRegEx", add_crccache_similar_page_regex, NULL, RSRC_CONF, "Regular expression to indicate which pages are similar to each other, per mime-type"),
 	{ NULL }
 };
 
@@ -241,7 +333,7 @@ int decode_if_block_header(request_rec *r, const char * header, int * version, s
 	int rslt = 0;
 
 	size_t headerlen = strlen(header);
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE headerlen: %zd", headerlen);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "CRCCACHE-ENCODE headerlen: %" APR_SIZE_T_FMT, headerlen);
 
 	extracted_hashes = malloc(headerlen);
 	if (extracted_hashes == NULL)
@@ -628,8 +720,8 @@ static apr_status_t process_block(ap_filter_t *f)
 		ctx->buffer+ctx->buffer_digest_getpos,
 		ctx->buffer_putpos-ctx->buffer_digest_getpos
 	);
-	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-			"CRCCACHE-ENCODE crc_read_block ndigested: %zu, result %ld", ndigested, rd_block_rslt);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+			"CRCCACHE-ENCODE crc_read_block ndigested: %" APR_SIZE_T_FMT ", result %ld", ndigested, rd_block_rslt);
 
 
 	// rd_block_rslt = 0: do nothing (it is a 'literal' block of exactly 'tail_blocksize' bytes at the end of the buffer,
@@ -766,8 +858,8 @@ static apr_status_t process_eos(ap_filter_t *f)
 	unsigned char sha1_value[APR_SHA1_DIGESTSIZE];
 	apr_sha1_final(sha1_value, &ctx->sha1_ctx);
 	write_hash(f, sha1_value, APR_SHA1_DIGESTSIZE);
-	ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
-		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%zu encoded=%zu original=%zu) for uri %s",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length, f->r->unparsed_uri);
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, f->r->server,
+		"CRCCACHE-ENCODE complete size %f%% (encoded-uncompressed=%" APR_SIZE_T_FMT " encoded=%" APR_SIZE_T_FMT " original=%" APR_SIZE_T_FMT ") for uri %s",100.0*((float)ctx->tx_length/(float)ctx->orig_length),ctx->tx_uncompressed_length, ctx->tx_length, ctx->orig_length, f->r->unparsed_uri);
 
 	return APR_SUCCESS;
 }
@@ -809,8 +901,8 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		if (ctx->buffer_putpos == ctx->buffer_size)
 		{
 			// Buffer is filled to the end. Flush as much as possible
-			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+					"CRCCACHE-ENCODE Buffer is filled to end, read_getpos: %" APR_SIZE_T_FMT ", digest_getpos: %" APR_SIZE_T_FMT ", putpos: %" APR_SIZE_T_FMT ", putpos-digest_getpos: %" APR_SIZE_T_FMT " (tail_block_size: %" APR_SIZE_T_FMT ")",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
 			while (ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->tail_block_size)
 			{
@@ -820,8 +912,8 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 				{
 					return rslt;
 				}
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Processed a block, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+						"CRCCACHE-ENCODE Processed a block, read_getpos: %" APR_SIZE_T_FMT ", digest_getpos: %" APR_SIZE_T_FMT ", putpos: %" APR_SIZE_T_FMT ", putpos-digest_getpos: %" APR_SIZE_T_FMT " (tail_block_size: %" APR_SIZE_T_FMT ")",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
 			}
 
@@ -829,8 +921,8 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 			{
 				// Copy the remaining part of the buffer to the start of the buffer,
 				// so that it can be filled again as new data arrive
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-						"CRCCACHE-ENCODE Moving %zu bytes to begin of buffer",
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+						"CRCCACHE-ENCODE Moving %" APR_SIZE_T_FMT " bytes to begin of buffer",
 						ctx->buffer_putpos - ctx->buffer_read_getpos);
 				memcpy(ctx->buffer, ctx->buffer + ctx->buffer_read_getpos, ctx->buffer_putpos - ctx->buffer_read_getpos);
 			}
@@ -842,8 +934,8 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		while (ctx->crc_read_block_result < 0 && ctx->buffer_putpos - ctx->buffer_digest_getpos > ctx->tail_block_size)
 		{
 			// Previous block matched exactly. Let's hope the next block as well
-			ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-					"CRCCACHE-ENCODE Previous block matched, read_getpos: %zu, digest_getpos: %zu, putpos: %zu, putpos-digest_getpos: %zu (tail_block_size: %zu)",
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+					"CRCCACHE-ENCODE Previous block matched, read_getpos: %" APR_SIZE_T_FMT ", digest_getpos: %" APR_SIZE_T_FMT ", putpos: %" APR_SIZE_T_FMT ", putpos-digest_getpos: %" APR_SIZE_T_FMT " (tail_block_size: %" APR_SIZE_T_FMT ")",
 					ctx->buffer_read_getpos, ctx->buffer_digest_getpos, ctx->buffer_putpos, ctx->buffer_putpos-ctx->buffer_digest_getpos, ctx->tail_block_size);
 			rslt = process_block(f);
 			if (rslt != APR_SUCCESS)
@@ -853,6 +945,48 @@ static apr_status_t process_data_bucket(ap_filter_t *f, apr_bucket *e)
 		}
 	}
 	return APR_SUCCESS; // Yahoo, all went well
+}
+
+static int match_content_type(request_rec *r, encodings_t *allowed_mime_types, const char *resp_content_type)
+{
+	// Response content type consists of mime-type, optionally followed by a ; and parameters
+	// E.g. text/html; charset=ISO-8859-15
+	// An allowed mime-type consists of one of:
+	//  -The NULL pointer to allow any mime-type (*/* in the config file)
+	//  -The string of format type/subtype, which must match exactly with the mime-type
+	//  -The string of format type/*, which means the subtype can be anything
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"resp_content_type: %s", resp_content_type);
+	while (allowed_mime_types != NULL)
+	{
+		const char *allowed_pos = allowed_mime_types->encoding;
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"allowed: %s", allowed_pos);
+		if (allowed_pos == NULL)
+		{
+			// User specified wild-card. This matches per definition.
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"matched wildcard");
+			return 1;
+		}
+		const char *resp_pos = resp_content_type;
+		char ch_r;
+		char ch_a;
+		while ((ch_r = *resp_pos) != 0 && ch_r != ';' && (ch_a = *allowed_pos) != 0 && ch_r == ch_a) {
+			resp_pos++;
+			allowed_pos++;
+		}
+		ch_a = *allowed_pos;
+		if (((ch_r == 0 || ch_r == ';') && ch_a == 0) || (ch_r != 0 && ch_a == '*')) 
+		{
+			// It's OK if the mime-type part of the response content type matches exactly
+			// with the allowed mime type
+			// It is also OK if the (mime-type part of the) content-type has still characters
+			// remaining but the allowed mime-type is at the * wild-card
+			ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"matched specific");
+			return 1;
+		}
+		allowed_mime_types = allowed_mime_types->next;
+	}
+	ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"nothing matched");
+	return 0;
 }
 
 /*
@@ -907,16 +1041,20 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		crccache_server_conf *conf = ap_get_module_config(r->server->module_config,
 				&crccache_server_module);
 		regexs_t *regexs = conf->regexs;
-		// ap_regmatch_t regmatch;
-		while (regexs != NULL)
+		const char *content_type = apr_table_get(r->headers_out, CONTENT_TYPE_HEADER);
+		if (content_type != NULL)
 		{
-			if (ap_regexec(regexs->preg, r->unparsed_uri, 0, NULL, AP_REG_ICASE) == 0)
+			while (regexs != NULL)
 			{
-				// Found a regex to which this page is similar. Store it in the header
-				apr_table_set(r->headers_out, CRCSYNC_SIMILAR_HEADER, apr_pstrdup(r->pool, regexs->regex));
-				break; 
+				if (match_content_type(r, regexs->mime_types, content_type) &&
+						ap_regexec(regexs->preg, r->unparsed_uri, 0, NULL, AP_REG_ICASE) == 0)
+				{
+					// Found a regex to which this page is similar. Store it in the header
+					apr_table_set(r->headers_out, CRCSYNC_SIMILAR_HEADER, apr_pstrdup(r->pool, regexs->regex));
+					break; 
+				}
+				regexs=regexs->next;
 			}
-			regexs=regexs->next;
 		}
 
 		if (ctx->global_state == GS_INIT)
@@ -1024,7 +1162,7 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 		// TODO: should I pass some apr_palloc based function to prevent memory leaks
 		//in case of unexpected errors?
 
-		ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE size of compression stream: %zd",sizeof(*(ctx->compression_stream)));
+		ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,"CRCCACHE-ENCODE size of compression stream: %" APR_SIZE_T_FMT, sizeof(*(ctx->compression_stream)));
 		ctx->compression_stream = apr_palloc(r->pool, sizeof(*(ctx->compression_stream)));
 		ctx->compression_stream->zalloc = Z_NULL;
 		ctx->compression_stream->zfree = Z_NULL;
@@ -1126,11 +1264,11 @@ static apr_status_t crccache_out_filter(ap_filter_t *f, apr_bucket_brigade *bb) 
 			 */
 			apr_bucket_read(e, &data, &len, APR_BLOCK_READ);
 			if (len > 2)
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-				"CRCCACHE-ENCODE Metadata, read %zu, %d %d %d",len,data[0],data[1],data[2]);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+				"CRCCACHE-ENCODE Metadata, read %" APR_SIZE_T_FMT ", %d %d %d",len,data[0],data[1],data[2]);
 			else
-				ap_log_error_wrapper(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
-								"CRCCACHE-ENCODE Metadata, read %zu",len);
+				ap_log_error(APLOG_MARK, APLOG_DEBUG, APR_SUCCESS, r->server,
+								"CRCCACHE-ENCODE Metadata, read %" APR_SIZE_T_FMT,len);
 			APR_BUCKET_REMOVE(e);
 			APR_BRIGADE_INSERT_TAIL(ctx->bb, e);
 			continue;

@@ -172,10 +172,9 @@ static apr_status_t file_cache_errorcleanup(disk_cache_object_t *dobj,
  * file for an ap_cache_el, this state information will be read
  * and written transparent to clients of this module
  */
-static int file_cache_recall_mydata(apr_file_t *fd, cache_info *info,
-		disk_cache_object_t *dobj, request_rec *r) {
+int file_cache_recall_mydata(apr_pool_t *ptemp, apr_file_t *fd, cache_info_t *info,
+		disk_cache_object_t *dobj, /*request_rec *r, */int validate_url) {
 	apr_status_t rv;
-	char *urlbuff;
 	disk_cache_info_t disk_info;
 	apr_size_t len;
 
@@ -197,17 +196,22 @@ static int file_cache_recall_mydata(apr_file_t *fd, cache_info *info,
 
 	/* Note that we could optimize this by conditionally doing the palloc
 	 * depending upon the size. */
-	urlbuff = apr_palloc(r->pool, disk_info.name_len + 1);
+	char *uribuf = apr_palloc(ptemp, disk_info.name_len + 1); 
+	if (uribuf == NULL)
+	{
+		return APR_EGENERAL;
+	}
 	len = disk_info.name_len;
-	rv = apr_file_read_full(fd, urlbuff, len, &len);
+	rv = apr_file_read_full(fd, uribuf, len, &len);
 	if (rv != APR_SUCCESS) {
 		return rv;
 	}
-	urlbuff[disk_info.name_len] = '\0';
+	uribuf[disk_info.name_len] = '\0';
+	info->uri = uribuf;
 
 	/* check that we have the same URL */
 	/* Would strncmp be correct? */
-	if (strcmp(urlbuff, dobj->name) != 0) {
+	if (validate_url && strcmp(info->uri, dobj->name) != 0) {
 		return APR_EGENERAL;
 	}
 
@@ -327,7 +331,7 @@ int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 			&crccache_client_module);
 	apr_finfo_t finfo;
 	cache_object_t *obj;
-	cache_info *info;
+	cache_info_t *info;
 	disk_cache_object_t *dobj;
 	int flags;
 	h->cache_obj = NULL;
@@ -436,7 +440,7 @@ int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     }
 
     /* Read the bytes to setup the cache_info fields */
-    rc = file_cache_recall_mydata(dobj->hfd, info, dobj, r);
+    rc = file_cache_recall_mydata(r->pool, dobj->hfd, info, dobj, 1);
     if (rc != APR_SUCCESS) {
         /* XXX log message */
         return DECLINED;
@@ -605,7 +609,7 @@ static apr_status_t store_array(apr_file_t *fd, apr_array_header_t* arr) {
 			&amt);
 }
 
-apr_status_t read_table(cache_handle_t *handle, request_rec *r,
+apr_status_t read_table(/*cache_handle_t *handle, request_rec *r,*/server_rec *s,
 		apr_table_t *table, apr_file_t *file) {
 	char w[MAX_STRING_LEN];
 	char *l;
@@ -617,7 +621,7 @@ apr_status_t read_table(cache_handle_t *handle, request_rec *r,
 		/* ### What about APR_EOF? */
 		rv = apr_file_gets(w, MAX_STRING_LEN - 1, file);
 		if (rv != APR_SUCCESS) {
-			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+			ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
 					"Premature end of cache headers.");
 			return rv;
 		}
@@ -737,7 +741,7 @@ apr_status_t store_table(apr_file_t *fd, apr_table_t *table) {
 }
 
 apr_status_t store_headers(cache_handle_t *h, request_rec *r,
-		cache_info *info) {
+		cache_info_t *info) {
 	crccache_client_conf *conf = ap_get_module_config(r->server->module_config,
 			&crccache_client_module);
 
@@ -903,7 +907,7 @@ apr_status_t store_headers(cache_handle_t *h, request_rec *r,
 }
 
 apr_status_t store_body(cache_handle_t *h, request_rec *r,
-		apr_bucket_brigade *bb) {
+		apr_bucket_brigade *bb, void (*post_store_body_callback)(disk_cache_object_t *dobj, request_rec *r)) {
 	apr_bucket *e;
 	apr_status_t rv;
 
@@ -984,6 +988,9 @@ apr_status_t store_body(cache_handle_t *h, request_rec *r,
 		file_cache_el_final(dobj, r);
 		ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
 				"disk_cache: Body for URL %s cached.", dobj->name);
+		if (post_store_body_callback != NULL) {
+			(*post_store_body_callback)(dobj, r);
+		}
 	}
 
 	return APR_SUCCESS;

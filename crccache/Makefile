@@ -10,26 +10,24 @@ CFLAGS=`apr-config --cflags --includes` $(EXTRA_FLAGS)
 CXXFLAGS=`apr-config --cppflags --includes` $(EXTRA_FLAGS)
 LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz
 
-all: mod_crccache_client.so mod_crccache_server.so benchmark test_hash_small_invokations
+all: mod_crccache_client.so mod_crccache_server.so benchmark test_hash_small_invokations done
 
-CACHE_SRC=cache/cache.o cache/cache_cache.o \
+CCAN_CRC=$(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
+
+COMMON=ap_log_helper.o $(CCAN_CRC) 
+
+CACHE=cache/cache.o cache/cache_cache.o \
 cache/cache_hash.o cache/cache_pqueue.o \
 cache/cache_util.o cache/cache_storage.o
 
-#cache/mod_cache.o
-#cache/mod_disk_cache.o
-#cache/mod_file_cache.o
-#cache/mod_socache_dbm.c
-#cache/mod_socache_dc.c
-#cache/mod_socache_memcache.c
-#cache/mod_socache_shmcb.c
+mod_crccache_client.so: mod_crccache_client.o $(COMMON) $(CACHE) rmm_hash.o mod_crccache_client_find_similar.o
+	gcc $^ -o $@ $(LDFLAGS) -shared
 
-
-%.so: %.o ap_wrapper.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o $(CACHE_SRC)
+mod_crccache_server.so: mod_crccache_server.o $(COMMON)
 	gcc $^ -o $@ $(LDFLAGS) -shared
 
 clean:
-	rm -rf *.so *.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
+	rm -rf *.so *.o $(COMMON) $(CACHE)
 
 benchmark: benchmark.o $(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
 	gcc $^ -o $@ $(LDFLAGS)
@@ -40,3 +38,5 @@ test_hash_small_invokations: test_hash_small_invokations.o $(CCAN_PATH)/crc/crc.
 restart:
 	sudo /etc/init.d/apache2 restart
  
+done:
+	echo "All done"

@@ -21,29 +21,33 @@
 #endif
 
 #define CRCCACHE_ENCODING "crcsync"
-const char * ACCEPT_ENCODING_HEADER = "Accept-Encoding";
-const char * CAPABILITY_HEADER = "Capability";
-const char * CRCSYNC_SIMILAR_HEADER = "Crcsync-Similar";
-const char * ENCODING_HEADER = "Content-Encoding";
-const char * BLOCK_HEADER = "If-Block";
-const char * VARY_HEADER = "Vary";
-const char * VARY_VALUE = "If-Block";
-const char * ETAG_HEADER = "ETag";
+#define ACCEPT_ENCODING_HEADER "Accept-Encoding"
+#define CAPABILITY_HEADER "Capability"
+#define CRCSYNC_SIMILAR_HEADER "Crcsync-Similar"
+#define ENCODING_HEADER "Content-Encoding"
+#define BLOCK_HEADER "If-Block"
+#define VARY_HEADER "Vary"
+#define VARY_VALUE "If-Block"
+#define ETAG_HEADER "ETag"
+#define HOST_HEADER "Host"
+#define CONTENT_TYPE_HEADER "Content-Type"
+#define ACCEPT_HEADER "Accept"
 
-const int HASH_SIZE=64; // bits per has, 30 bits is 5 bytes base 64
+ // bits per hash, 30 bits is 5 bytes base 64
+#define HASH_SIZE 64
 
 // HASH_SIZE_BYTES*FULL_BLOCK_COUNT*4/3 rounded up to the nearest multiple of 3
 // 8*40*4/3 = 438
-const int HASH_HEADER_SIZE=427;
+#define HASH_HEADER_SIZE 427
 
 
-const unsigned char ENCODING_LITERAL='L';
-const unsigned char ENCODING_BLOCK='B';
-const unsigned char ENCODING_COMPRESSED='Z';
-const unsigned char ENCODING_HASH='S';
+#define ENCODING_LITERAL 'L'
+#define ENCODING_BLOCK 'B'
+#define ENCODING_COMPRESSED 'Z'
+#define ENCODING_HASH 'S'
 
-const int ENCODING_COMPRESSED_HEADER_SIZE = 1;// 1 byte indicator
-const int ENCODING_LITERAL_HEADER_SIZE = 1+4;// 1 byte indicator + 4 bytes length
-const int ENCODING_BLOCK_HEADER_SIZE = 1+1;// 1 byte indicator + 1 byte block
+#define ENCODING_COMPRESSED_HEADER_SIZE  1 /* 1 byte indicator */
+#define ENCODING_LITERAL_HEADER_SIZE (1+4) /* 1 byte indicator + 4 bytes length */
+#define ENCODING_BLOCK_HEADER_SIZE (1+1) /* 1 byte indicator + 1 byte block */
 
 #endif /* CRCCACHE_H_ */

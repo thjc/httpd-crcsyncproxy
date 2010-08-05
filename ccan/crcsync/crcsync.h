@@ -8,15 +8,17 @@
  * crc_of_blocks - calculate the crc of the blocks.
  * @data: pointer to the buffer to CRC
  * @len: length of the buffer
- * @blocksize: CRC of each block (final block may be shorter)
+ * @normal_block_size: Size of non-tail blocks
+ * @tail_block_size: Size of tail block (might be 0)
  * @crcbits: the number of bits of crc you want (currently 64 maximum)
- * @crc: the crcs (array will have (len + blocksize-1)/blocksize entries).
+ * @crc: the crcs (array will have (len - tail_block_size)/blocksize + (tail_block_size != 0) entries).
  *
  * Calculates the CRC of each block, and output the lower @crcbits to
  * @crc array.
  */
-void crc_of_blocks(const void *data, size_t len, unsigned int blocksize,
-		   unsigned int crcbits, bool merge_trailing_bytes_in_last_block, uint64_t crc[]);
+void crc_of_blocks(const void *data, size_t len, unsigned int normal_block_size,
+		unsigned int tail_block_size,
+		   unsigned int crcbits, uint64_t crc[]);
 
 /**
  * crc_context_new - allocate and initialize state for crc_find_block

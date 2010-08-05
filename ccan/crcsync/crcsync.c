@@ -12,22 +12,22 @@ static uint64_t mask_of(unsigned int crcbits)
 }
 
 void crc_of_blocks(const void *data, size_t len, unsigned int normal_block_size,
-		   unsigned int crcbits, bool merge_trailing_bytes_in_last_block, uint64_t crc[])
+		   unsigned int tail_block_size,
+		   unsigned int crcbits, uint64_t crc[])
 {
-	unsigned int nblocks = len/normal_block_size;
+	unsigned int n_normalblocks = (len-tail_block_size)/normal_block_size;
 	unsigned int i;
 	const uint8_t *buf = data;
 	uint64_t crcmask = mask_of(crcbits);
 
-	if (len%normal_block_size && !merge_trailing_bytes_in_last_block)
-		nblocks++;
-
-	for (i = 0; i < nblocks - 1; i++) {
+	for (i = 0; i < n_normalblocks; i++) {
 		crc[i] = (crc64_iso(0, buf, normal_block_size) & crcmask);
 		buf += normal_block_size;
 		len -= normal_block_size;
 	}
-	crc[i] = (crc64_iso(0, buf, len) & crcmask);
+	if (tail_block_size != 0) {
+		crc[i] = (crc64_iso(0, buf, len) & crcmask);
+	}
 }
 
 struct crc_hash_record {

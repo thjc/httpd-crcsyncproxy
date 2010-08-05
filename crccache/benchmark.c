@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
 	bm_crccalculate.start = clock();
 	for (cnt=0; cnt != TEST_ITERATIONS_COUNT; cnt++)
 	{
-		crc_of_blocks(original_data->buf, original_data->datasize, block_size, HASH_SIZE, merge_trailing_blocks_in_last_block, match_hashes);
+		crc_of_blocks(original_data->buf, original_data->datasize, block_size, tail_block_size, HASH_SIZE, match_hashes);
 	}
 	bm_crccalculate.end = clock();
 	

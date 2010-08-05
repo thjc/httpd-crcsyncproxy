@@ -28,10 +28,10 @@ int main(int argc, char *argv[])
 	uint64_t hashes[nblocks];
 	size_t datalen = strlen(tstdata);
 	size_t block_size = datalen/nblocks;
-	crc_of_blocks(tstdata, datalen, block_size, 64, true, hashes); // set-up hashes
-	
-	
 	size_t tail_size = block_size + datalen%nblocks;
+	crc_of_blocks(tstdata, datalen, block_size, tail_size, 64, hashes); // set-up hashes
+	
+	
 	printf("block_size: %zd, tail_size: %zd, nblocks: %zd\n", block_size, tail_size, nblocks);
 	struct crc_context *crcctx = crc_context_new(block_size, 64, hashes, nblocks, tail_size);
 	printf("context initialized\n");
