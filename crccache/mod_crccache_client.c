@@ -429,9 +429,10 @@ static int crccache_decode_filter(ap_filter_t *f, apr_bucket_brigade *bb) {
 			int etaglen = strlen(etag);
 			if (etaglen>strlen(CRCCACHE_ENCODING) + 1)
 			{
-				if (strcmp("-"CRCCACHE_ENCODING,&etag[etaglen-(strlen(CRCCACHE_ENCODING) + 1)])==0)
+				int etag_start_pos = etaglen-(strlen(CRCCACHE_ENCODING) + 1);
+				if (strcmp("-"CRCCACHE_ENCODING,&etag[etag_start_pos])==0)
 				{
-					etag[etaglen-(strlen(CRCCACHE_ENCODING) + 1)] = '\0';
+					etag[etag_start_pos] = '\0';
 					apr_table_setn(r->headers_out,"etag",etag);
 				}
 			}
@@ -966,18 +967,12 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     int rv = !OK;
     request_rec *r = f->r;
     cache_request_rec *cache;
-    crccache_client_conf *conf;
-    //const char *cc_out, *cl;
     const char *cl;
-    const char *exps, /* *lastmods,*/ *dates;//, *etag;
-    apr_time_t exp, date,/* lastmod,*/ now;
+    const char *exps, *dates;
+    apr_time_t exp, now;
     apr_off_t size;
     cache_info_t *info = NULL;
     char *reason;
-    apr_pool_t *p;
-
-    conf = (crccache_client_conf *) ap_get_module_config(r->server->module_config,
-                                                      &crccache_client_module);
 
     /* Setup cache_request_rec */
     cache = (cache_request_rec *) ap_get_module_config(r->request_config,
@@ -992,7 +987,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
     }
 
     reason = NULL;
-    p = r->pool;
     /*
      * Pass Data to Cache
      * ------------------
@@ -1115,7 +1109,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
          */
         apr_bucket *e;
         int all_buckets_here=0;
-        int unresolved_length = 0;
         size=0;
         for (e = APR_BRIGADE_FIRST(in);
              e != APR_BRIGADE_SENTINEL(in);
@@ -1126,7 +1119,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
                 break;
             }
             if (APR_BUCKET_IS_FLUSH(e)) {
-                unresolved_length = 1;
                 continue;
             }
             if (e->length == (apr_size_t)-1) {
@@ -1240,7 +1232,6 @@ int cache_save_filter(ap_filter_t *f, apr_bucket_brigade *in)
         /* no date header (or bad header)! */
         info->date = now;
     }
-    date = info->date;
 
     /* set response_time for HTTP/1.1 age calculations */
     info->response_time = now;

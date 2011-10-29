@@ -369,7 +369,6 @@ CACHE_DECLARE(apr_table_t *)ap_cache_cacheable_headers(apr_pool_t *pool,
                                                         apr_table_t *t,
                                                         server_rec *s)
 {
-    crccache_client_conf *conf;
     apr_table_t *headers_out;
 
     /* Short circuit the common case that there are not
@@ -393,9 +392,6 @@ CACHE_DECLARE(apr_table_t *)ap_cache_cacheable_headers(apr_pool_t *pool,
     apr_table_unset(headers_out, "Trailers");
     apr_table_unset(headers_out, "Transfer-Encoding");
     apr_table_unset(headers_out, "Upgrade");
-
-    conf = (crccache_client_conf *)ap_get_module_config(s->module_config,
-                                                     &crccache_client_module);
 
     return headers_out;
 }
