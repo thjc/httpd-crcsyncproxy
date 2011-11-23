@@ -1,3 +1,4 @@
 *~
 *.tar.gz
 pkgtmp
+crccache/test_hash_small_invokations

@@ -97,7 +97,6 @@ CACHE_DECLARE(void) ap_cache_accept_headers(cache_handle_t *h, request_rec *r,
 apr_status_t cache_generate_key_default(request_rec *r, apr_pool_t* p,
                                         char**key)
 {
-    crccache_client_conf *conf;
     cache_request_rec *cache;
     char *port_str, *hn, *lcs;
     const char *hostname, *scheme;
@@ -121,13 +120,6 @@ apr_status_t cache_generate_key_default(request_rec *r, apr_pool_t* p,
         *key = apr_pstrdup(p, cache->key);
         return APR_SUCCESS;
     }
-
-    /*
-     * Get the module configuration. We need this for the CacheIgnoreQueryString
-     * option below.
-     */
-    conf = (crccache_client_conf *) ap_get_module_config(r->server->module_config,
-                                                      &crccache_client_module);
 
     /*
      * Use the canonical name to improve cache hit rate, but only if this is
