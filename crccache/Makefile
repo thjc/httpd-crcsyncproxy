@@ -12,7 +12,7 @@ LDFLAGS=`apr-1-config --link-ld --libs` -laprutil-1 -lz
 
 all: mod_crccache_client.so mod_crccache_server.so benchmark test_hash_small_invokations done
 
-CCAN_CRC=$(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o
+CCAN_CRC=$(CCAN_PATH)/crc/crc.o $(CCAN_PATH)/crcsync/crcsync.o 
 
 COMMON=ap_log_helper.o $(CCAN_CRC) 
 

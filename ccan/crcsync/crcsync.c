@@ -3,6 +3,7 @@
 #include <string.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 /* FIXME: That 64-bit CRC takes a while to warm the lower bits.  Do
  * some quantitative tests and replace it?  Meanwhile, use upper bits. */
@@ -21,12 +22,12 @@ void crc_of_blocks(const void *data, size_t len, unsigned int normal_block_size,
 	uint64_t crcmask = mask_of(crcbits);
 
 	for (i = 0; i < n_normalblocks; i++) {
-		crc[i] = (crc64_iso(0, buf, normal_block_size) & crcmask);
+		crc[i] = (crcFast(0, 0, buf, normal_block_size) & crcmask);
 		buf += normal_block_size;
 		len -= normal_block_size;
 	}
 	if (tail_block_size != 0) {
-		crc[i] = (crc64_iso(0, buf, len) & crcmask);
+		crc[i] = (crcFast(0, 0, buf, len) & crcmask);
 	}
 }
 
@@ -78,6 +79,8 @@ static uint64_t crc64_over_zeros(const uint64_t *crc64_iso_tab, uint64_t crc, in
 	}
 	return crc;
 }
+
+
 
 /* Initialize one table that is used to calculate how the crc changes when we take a give
  * char out of the crc'd area. This function is to be used when there is no tail block */
@@ -154,7 +157,7 @@ struct crc_context *crc_context_new(size_t normal_block_size, unsigned crcbits,
 
 	ctx = malloc(sizeof(*ctx) + sizeof(crc[0])*num_crcs);
 	if (ctx) {
-		ctx->crc64_iso_tab = crc64_iso_table();
+		ctx->crc64_iso_tab = getCrcTable();
 		ctx->normal_block_size = normal_block_size;
 		if (tail_block_size == normal_block_size)
 		{
@@ -295,12 +298,12 @@ size_t crc_read_block(struct crc_context *ctx, long *result,
 				if (ctx->tail_block_size)
 				{
 					nbytes = MIN(buflen - consumed, MIN(ctx->normal_block_size - ctx->literal_bytes, ctx->tail_block_size - ctx->literal_bytes));
-					ctx->running_tail_crc = ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+					ctx->running_tail_crc = ctx->running_normal_crc = crcFast(0, ctx->running_normal_crc, get_pos, nbytes);
 				}
 				else
 				{
 					nbytes = MIN(buflen - consumed, ctx->normal_block_size - ctx->literal_bytes);
-					ctx->running_normal_crc = crc64_iso(ctx->running_normal_crc, get_pos, nbytes);
+					ctx->running_normal_crc = crcFast(0, ctx->running_normal_crc, get_pos, nbytes);
 				}
 				consumed += nbytes;
 				ctx->literal_bytes += nbytes;
